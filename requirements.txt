@@ -1,0 +1,5 @@
+# Stdlib + these, nothing else without asking first (CLAUDE.md rule 8).
+typer==0.27.2
+pydantic==2.13.5
+pytest==9.1.1
+fastapi==0.141.1
