@@ -3,3 +3,6 @@ typer==0.27.2
 pydantic==2.13.5
 pytest==9.1.1
 fastapi==0.141.1
+# P4: LLM provider SDKs behind recon/llm/client.py's strategy pattern.
+anthropic==1.2.0
+google-genai==2.20.0

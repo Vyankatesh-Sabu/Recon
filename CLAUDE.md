@@ -38,7 +38,11 @@ treat this file as the non-negotiable "how".
    flip that status.
 
 8. **Stack: Python 3.12, stdlib + pydantic v2 + typer + pytest + fastapi.**
-   Nothing else without asking first.
+   Nothing else without asking first. **Approved exception (P4):** `anthropic`
+   and `google-genai`, the two LLM provider SDKs — `recon/llm/client.py` uses
+   a strategy pattern (one `LLMClient` protocol, swappable concrete backends)
+   specifically so the provider isn't locked in; adding a third provider SDK
+   later is expected and doesn't need to come back here to ask.
 
 9. **Phase gates in `tests/gates/` are mandatory.** Never start phase N+1
    before phase N's gate script passes. Never weaken a gate to make it pass.

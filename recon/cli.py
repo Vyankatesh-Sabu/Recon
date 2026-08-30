@@ -1,7 +1,8 @@
 """cli.py — typer app: generate|load|run|report|serve (SPEC §2).
 
-P3: `generate`, `load`, `run` (V3 -> hop1 -> hop2 -> hop3 -> verifier -> V5
--> scorer), and `report` all do real work. `serve` is still a P0 stub — P5.
+P4: `generate`, `load`, `run` (V3 -> hop1 -> hop2 -> hop3 -> verifier ->
+[tier4 -> verifier, if --llm on] -> V5 -> scorer), and `report` all do real
+work. `serve` is still a P0 stub — P5.
 """
 
 from __future__ import annotations
@@ -58,15 +59,31 @@ def load() -> None:
 
 @app.command()
 def run(
-    llm: str = typer.Option("off", help="on|off — SPEC.md rule 5 (tier4 isn't built yet; off is the only mode)"),
+    llm: str = typer.Option("off", help="on|off — CLAUDE.md rule 5: never load-bearing, off always works"),
+    llm_provider: str = typer.Option(
+        None, help="anthropic|gemini — which LLMClient strategy backs tier4 (default: $RECON_LLM_PROVIDER, else anthropic)"
+    ),
 ) -> None:
-    """Run the matching pipeline: V3 -> hop1 -> hop2 -> hop3 -> verifier -> V5 -> scorer (SPEC §6). tier4 lands in P4."""
-    ctx = pipeline.run_pipeline(llm_mode=llm)
+    """Run the matching pipeline: V3 -> hop1 -> hop2 -> hop3 -> verifier -> [tier4 -> verifier] -> V5 -> scorer (SPEC §6)."""
+    llm_client = None
+    if llm == "on":
+        from recon.llm.client import create_llm_client
+
+        llm_client = create_llm_client(llm_provider)
+    ctx = pipeline.run_pipeline(llm_mode=llm, llm_client=llm_client)
     m = ctx["metrics"]
     typer.echo(
         f"run: {ctx['run_id']} — {m['records_processed']} records, {m['runtime_s']:.2f}s, "
         f"false-match rate {m['false_match_rate'] * 100:.1f}%, "
-        f"{m['exceptions']['open']} open exceptions. Run `recon.cli report` to render it."
+        f"{m['exceptions']['open']} open exceptions"
+        + (
+            f", LLM: {m['llm_calls']['total']} calls "
+            f"({m['llm_calls']['accepted']} accepted, {m['llm_calls']['rejected']} rejected, "
+            f"{m['llm_calls']['abstained']} abstained)"
+            if llm == "on"
+            else ""
+        )
+        + ". Run `recon.cli report` to render it."
     )
 
 

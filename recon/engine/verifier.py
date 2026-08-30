@@ -245,15 +245,21 @@ def run_verifier(conn: sqlite3.Connection, run_id: str) -> VerifierStats:
             stats.duplicate_claims += 1
             add_duplicate_claim(hop, [{"src": src_a, "id": id_a}, {"src": src_b, "id": id_b}], link_id)
 
-    def reject_v1(link_id: str, reason: str) -> None:
+    def reject_v1(link_id: str, reason: str, tier: int | None = None) -> None:
+        # Tier 4 (LLM) proposals get a distinguishing rejection message —
+        # SPEC §8/V6: "rejection demotes to the original exception with
+        # llm_rejected=true noted." The original exception itself is left
+        # untouched (never written by this rejection path) — it's simply
+        # never resolved, which is what "demotes to" means in practice.
+        prefix = "V1_failed (tier4/llm proposal rejected)" if tier == 4 else "V1_failed"
         conn.execute(
             "UPDATE match_link SET status = 'rejected', reason = ? WHERE link_id = ?",
-            (f"V1_failed: {reason}", link_id),
+            (f"{prefix}: {reason}", link_id),
         )
         stats.rejected += 1
 
     proposed = conn.execute(
-        "SELECT link_id, hop, src_a, id_a, src_b, id_b FROM match_link "
+        "SELECT link_id, hop, src_a, id_a, src_b, id_b, tier FROM match_link "
         "WHERE run_id = ? AND status = 'proposed' ORDER BY link_id",
         (run_id,),
     ).fetchall()
@@ -262,7 +268,7 @@ def run_verifier(conn: sqlite3.Connection, run_id: str) -> VerifierStats:
     hop3_links = [r for r in proposed if r[1] == 3]
 
     # --- hop 1: each link is independently verifiable ---
-    for link_id, hop, src_a, id_a, src_b, id_b in hop1_links:
+    for link_id, hop, src_a, id_a, src_b, id_b, _tier in hop1_links:
         ok, reason = _verify_hop1(conn, id_a, id_b)
         if not ok:
             reject_v1(link_id, reason)
@@ -271,22 +277,25 @@ def run_verifier(conn: sqlite3.Connection, run_id: str) -> VerifierStats:
 
     # --- hop 2: a batch (all rows sharing a bank line) is verified, then
     # accepted or rejected, atomically — a bank line's reconstruction is
-    # only meaningful as a whole ---
+    # only meaningful as a whole. This is also where tier-4 (LLM) proposals
+    # land: same hop, same grouping, same re-derivation from raw rows — a
+    # tier-4 proposal must pass V1+V2 like any other (SPEC §8/V6). ---
     batches: dict[str, list[tuple]] = {}
     for r in hop2_links:
         batches.setdefault(r[5], []).append(r)  # group by id_b
     for id_b, links in sorted(batches.items()):
         id_a_list = [r[3] for r in links]
         ok, reason = _verify_hop2_batch(conn, id_a_list, id_b)
+        tier = links[0][6]
         if not ok:
             for link_id, *_ in links:
-                reject_v1(link_id, reason)
+                reject_v1(link_id, reason, tier=tier)
             continue
-        for link_id, hop, src_a, id_a, src_b, id_b in links:
+        for link_id, hop, src_a, id_a, src_b, id_b, _tier in links:
             accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b)
 
     # --- hop 3 (V4): each bank<->voucher pairing is independently verifiable ---
-    for link_id, hop, src_a, id_a, src_b, id_b in hop3_links:
+    for link_id, hop, src_a, id_a, src_b, id_b, _tier in hop3_links:
         ok, reason = _verify_hop3(conn, id_a, id_b)
         if not ok:
             reject_v1(link_id, reason)

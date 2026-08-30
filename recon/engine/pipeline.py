@@ -2,12 +2,21 @@
 
 Assumes `recon.cli load` has already run (schema migrated, data/*.csv
 loaded into the DB) — this module picks up from there: V3 -> hop1 -> hop2
--> hop3 -> verifier -> V5 -> score. tier4 lands in P4.
+-> hop3 -> verifier -> [tier4 -> verifier again, if llm_mode=='on'] -> V5
+-> score. Matches SPEC §6's stated run order exactly: hop3 runs BEFORE the
+verifier's first pass (so hop3's "accepted settlement line" actually means
+"hop2 proposed", not yet verifier-accepted — see hop3.py), and tier4 only
+gets a turn on whatever residue survives that first pass.
 
 If V5 (the clearing-account control) fails, `run_pipeline` lets
 verifier.ClearingControlFailure propagate uncaught — no partial `runs` row
 is marked finished, no report is generated. This control exists to catch
 OUR bugs; never catch-and-continue past it.
+
+CLAUDE.md rule 5: the LLM is never load-bearing. `llm_mode='off'` never
+imports recon.llm at all — the exact same V3->hop1->hop2->hop3->verifier->V5
+path runs either way; llm_mode='on' only ever ADDS a chance to resolve
+residue that already reports honestly as an exception without it.
 """
 
 from __future__ import annotations
@@ -74,8 +83,14 @@ def run_pipeline(
     ground_truth_path: Path | str = Path("data/ground_truth.json"),
     seed: int = config.SEED,
     llm_mode: str = "off",
+    llm_client: object | None = None,
 ) -> dict:
-    """Run V3 -> hop1 -> hop2 -> hop3 -> verifier -> V5 -> score against the loaded DB.
+    """Run V3 -> hop1 -> hop2 -> hop3 -> verifier -> [tier4 -> verifier] -> V5 -> score.
+
+    `llm_client`: an `LLMClient` to use when `llm_mode=='on'` (tests inject
+    `MockLLM`; omitted, a real provider backend is constructed from
+    `RECON_LLM_PROVIDER`/API-key env vars via `recon.llm.client.create_llm_client`).
+    Ignored when `llm_mode=='off'` — recon.llm is never even imported in that case.
 
     Returns a run context dict (run_id, timing, metrics, top_exceptions,
     per-stage stats) that report.py renders. Writes the `runs` row itself.
@@ -97,7 +112,21 @@ def run_pipeline(
         hop1_stats = hop1.run_hop1(conn, run_id)
         hop2_stats = hop2.run_hop2(conn, run_id)
         hop3_stats = hop3.run_hop3(conn, run_id)
-        verifier_stats = verifier.run_verifier(conn, run_id)
+        verifier.run_verifier(conn, run_id)  # 1st pass: hop1/hop2/hop3 proposals
+
+        tier4_stats = None
+        narrated = 0
+        if llm_mode == "on":
+            from recon.llm import adjudicator
+            from recon.llm.client import create_llm_client
+
+            client = llm_client if llm_client is not None else create_llm_client()
+            tier4_stats = adjudicator.run_tier4(conn, run_id, hop2_stats.evidence_log, client)
+            verifier.run_verifier(conn, run_id)  # 2nd pass: tier-4 proposals only
+            adjudicator.finalize_tier4_stats(conn, run_id, tier4_stats)
+            adjudicator.resolve_exceptions_for_accepted_tier4(conn, run_id)
+            narrated = adjudicator.narrate_exceptions(conn, run_id, client)
+
         verifier.check_v5_clearing_control(conn, run_id)  # aborts (raises) on mismatch
         runtime_s = time.monotonic() - t0
 
@@ -107,6 +136,15 @@ def run_pipeline(
         metrics["llm_mode"] = llm_mode
         metrics["v3_violations"] = v3_violations
         metrics["residual_p"] = verifier.compute_residual_p(conn)
+        metrics["narrated_exceptions"] = narrated
+        if tier4_stats is not None:
+            metrics["llm_calls"] = {
+                "total": tier4_stats.proposed + tier4_stats.abstained,
+                "accepted": tier4_stats.accepted,
+                "rejected": tier4_stats.rejected,
+                "abstained": tier4_stats.abstained,
+            }
+            metrics["llm_call_log"] = tier4_stats.call_log
 
         finished_at = datetime.now(timezone.utc).isoformat()
         conn.execute(
@@ -128,7 +166,7 @@ def run_pipeline(
             "hop1_stats": hop1_stats,
             "hop2_stats": hop2_stats,
             "hop3_stats": hop3_stats,
-            "verifier_stats": verifier_stats,
+            "tier4_stats": tier4_stats,
         }
     finally:
         conn.close()
