@@ -64,3 +64,52 @@ class GeminiLLM:
 
     def explain(self, evidence: dict) -> str:
         return self._complete(_EXPLAIN_SYSTEM, evidence)
+
+    def converse(self, messages: list[dict], tools: list[dict], system: str) -> dict:
+        """NOTE: best-effort, same caveat as the module docstring — Gemini's
+        function-calling shape (Tool/FunctionDeclaration, Content/Part,
+        function_call/function_response) is reproduced from training
+        knowledge, not verified against a live SDK reference this session."""
+        from google.genai import types
+
+        contents = []
+        for m in messages:
+            if m["role"] == "user":
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=m["content"])]))
+            elif m["role"] == "assistant":
+                parts = [
+                    types.Part.from_function_call(name=block["name"], args=block["input"])
+                    for block in m["content"]
+                    if block["type"] == "tool_use"
+                ]
+                contents.append(types.Content(role="model", parts=parts))
+            elif m["role"] == "tool_result":
+                c = m["content"]
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_function_response(name=c["name"], response=c["result"])],
+                    )
+                )
+
+        gemini_tools = [
+            types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(name=t["name"], description=t["description"], parameters=t["input_schema"])
+                    for t in tools
+                ]
+            )
+        ]
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=contents,
+            config=types.GenerateContentConfig(system_instruction=system, temperature=0, tools=gemini_tools),
+        )
+        parts = response.candidates[0].content.parts if response.candidates else []
+        tool_calls = [
+            {"id": f"call_{i}", "name": p.function_call.name, "input": dict(p.function_call.args)}
+            for i, p in enumerate(parts)
+            if getattr(p, "function_call", None)
+        ]
+        text = "".join(p.text for p in parts if getattr(p, "text", None)) or None
+        return {"stop_reason": "tool_use" if tool_calls else "end_turn", "tool_calls": tool_calls, "text": text}

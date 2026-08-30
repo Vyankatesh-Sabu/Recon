@@ -1,14 +1,16 @@
-"""client.py — LLMClient strategy interface, MockLLM, and provider backends (SPEC §8).
+"""client.py — LLMClient strategy interface, MockLLM, and provider backends (SPEC §8, §9).
 
-Interface first, real model last. `LLMClient` is a `Protocol` with two duties
-(`adjudicate`, `explain`); every concrete backend — `MockLLM` (canned, used by
-every test and gate), `AnthropicLLM`, `GeminiLLM` — implements the same two
-methods and returns raw JSON text. `adjudicator.py` owns parsing, schema
-validation, and the one-retry-then-abstain policy; a client never validates
-its own output. CLAUDE.md rule 5: the LLM is never load-bearing — every
-concrete client (including a missing/misconfigured RealLLM) fails by raising,
-never by fabricating a plausible-looking answer, and `--llm off` never
-constructs a client at all.
+Interface first, real model last. `LLMClient` is a `Protocol` with three
+duties: `adjudicate`/`explain` (tier 4, SPEC §8 — return raw JSON text,
+parsed and validated only by adjudicator.py) and `converse` (the Q&A tool-
+calling loop, SPEC §9.2 — returns an already-structured dict, since a
+tool-calling turn has no single JSON payload to validate against a fixed
+schema the way the other two duties do). Every concrete backend — `MockLLM`
+(canned, used by every test and gate), `AnthropicLLM`, `GeminiLLM` —
+implements the same three methods. CLAUDE.md rule 5: the LLM is never
+load-bearing — every concrete client (including a missing/misconfigured
+RealLLM) fails by raising, never by fabricating a plausible-looking answer,
+and `--llm off` never constructs a client at all.
 """
 
 from __future__ import annotations
@@ -66,12 +68,30 @@ class ExceptionNarrative(BaseModel):
 
 class LLMClient(Protocol):
     """Strategy interface — every backend (mock or real, any provider)
-    implements exactly this. Both methods return raw response text;
-    `adjudicator.py` is the only code that parses/validates it."""
+    implements exactly this."""
 
-    def adjudicate(self, payload: dict) -> str: ...
+    def adjudicate(self, payload: dict) -> str:
+        """Raw response text for a tier-4 payload; adjudicator.py parses/validates it."""
+        ...
 
-    def explain(self, evidence: dict) -> str: ...
+    def explain(self, evidence: dict) -> str:
+        """Raw response text for an exception-narration request; adjudicator.py parses/validates it."""
+        ...
+
+    def converse(self, messages: list[dict], tools: list[dict], system: str) -> dict:
+        """One turn of the Q&A tool-calling loop (SPEC §9.2).
+
+        `messages`: provider-agnostic history — each entry is
+        `{"role": "user"|"assistant"|"tool_result", "content": ...}`; a
+        `tool_result` entry's content is `{"tool_call_id", "name", "result"}`.
+        `tools`: SPEC §9.1 tool schemas (name/description/input_schema).
+
+        Returns `{"stop_reason": "tool_use"|"end_turn", "tool_calls":
+        [{"id", "name", "input"}, ...], "text": str | None}` — normalized
+        the same way regardless of provider, since qa.py's loop is written
+        once against this shape, not against any one provider's SDK types.
+        """
+        ...
 
 
 class MockLLM:
@@ -82,16 +102,24 @@ class MockLLM:
 
     `adjudicate_script`: keyed by `payload["item"]["line_id"]`.
     `explain_script`: keyed by `evidence["code"]`.
+    `qa_script`: keyed by any substring of the ORIGINAL question (the first
+    user message); value is an ordered list of steps, each either
+    `{"tool_call": {"name": ..., "input": {...}}}` or `{"answer": "..."}`.
+    Consumed one step per `converse()` call for that conversation — the
+    step index is derived statelessly from how many tool results already
+    appear in `messages`, exactly like a real multi-turn loop would resume.
     """
 
     def __init__(
         self,
         adjudicate_script: dict[str, dict] | None = None,
         explain_script: dict[str, dict] | None = None,
+        qa_script: dict[str, list[dict]] | None = None,
     ) -> None:
         self.adjudicate_script = adjudicate_script or {}
         self.explain_script = explain_script or {}
-        self.calls: list[dict] = []  # every payload/evidence seen, for test inspection
+        self.qa_script = qa_script or {}
+        self.calls: list[dict] = []  # every payload/evidence/messages seen, for test inspection
 
     def adjudicate(self, payload: dict) -> str:
         self.calls.append({"kind": "adjudicate", "payload": payload})
@@ -133,6 +161,29 @@ class MockLLM:
                 "suggested_action": "Review the underlying records and resolve manually.",
             }
         )
+
+    def converse(self, messages: list[dict], tools: list[dict], system: str) -> dict:
+        self.calls.append({"kind": "converse", "messages": messages, "tools": tools})
+        question = messages[0]["content"] if messages and messages[0]["role"] == "user" else ""
+        steps = next((v for k, v in self.qa_script.items() if k in question), None)
+        step_index = sum(1 for m in messages if m["role"] == "tool_result")
+
+        if steps is not None and step_index < len(steps):
+            step = steps[step_index]
+            if "tool_call" in step:
+                call = step["tool_call"]
+                return {
+                    "stop_reason": "tool_use",
+                    "tool_calls": [{"id": f"call_{step_index}", "name": call["name"], "input": call["input"]}],
+                    "text": None,
+                }
+            return {"stop_reason": "end_turn", "tool_calls": [], "text": step["answer"]}
+
+        return {
+            "stop_reason": "end_turn",
+            "tool_calls": [],
+            "text": "The data does not show enough to answer this (no scripted response for this question).",
+        }
 
 
 def create_llm_client(provider: str | None = None) -> LLMClient:

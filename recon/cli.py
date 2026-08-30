@@ -1,8 +1,7 @@
 """cli.py — typer app: generate|load|run|report|serve (SPEC §2).
 
-P4: `generate`, `load`, `run` (V3 -> hop1 -> hop2 -> hop3 -> verifier ->
-[tier4 -> verifier, if --llm on] -> V5 -> scorer), and `report` all do real
-work. `serve` is still a P0 stub — P5.
+P5: every command does real work. `serve` runs the FastAPI app (recon/api.py,
+POST /ask — SPEC §9) via uvicorn if installed. The dashboard (SPEC §10) is P6.
 """
 
 from __future__ import annotations
@@ -100,12 +99,23 @@ def report() -> None:
 
 
 @app.command()
-def serve() -> None:
-    """Start the FastAPI app exposing Q&A tools + dashboard endpoints (SPEC.md §9-10)."""
-    typer.echo(
-        "serve: would start the FastAPI app (Q&A tools + dashboard, SPEC.md "
-        "§9-10) — not yet implemented"
-    )
+def serve(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+) -> None:
+    """Serve the FastAPI app: POST /ask (SPEC §9). The dashboard (SPEC §10) is P6."""
+    try:
+        import uvicorn
+    except ImportError:
+        typer.echo(
+            "serve: the app is implemented (recon/api.py: POST /ask) but uvicorn isn't "
+            "installed to run it — `pip install uvicorn` (not yet an approved dependency; "
+            "add it to requirements.txt if you want `serve` to actually listen on a port). "
+            "Meanwhile, tests/gates exercise the same app in-process via FastAPI's TestClient, "
+            "no server needed."
+        )
+        raise typer.Exit(code=1)
+    uvicorn.run("recon.api:app", host=host, port=port)
 
 
 if __name__ == "__main__":

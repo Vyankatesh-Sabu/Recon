@@ -40,8 +40,29 @@ _EXPLAIN_SYSTEM = (
 )
 
 
+def _to_anthropic_messages(messages: list[dict]) -> list[dict]:
+    """Translate qa.py's provider-agnostic history into Anthropic's shape.
+    `tool_result` entries become a user-role tool_result content block —
+    Anthropic has no separate "tool" role."""
+    out = []
+    for m in messages:
+        if m["role"] == "tool_result":
+            c = m["content"]
+            out.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": c["tool_call_id"], "content": json.dumps(c["result"])}
+                    ],
+                }
+            )
+        else:
+            out.append({"role": m["role"], "content": m["content"]})
+    return out
+
+
 class AnthropicLLM:
-    """Anthropic API backend for LLMClient (strategy pattern, SPEC §8)."""
+    """Anthropic API backend for LLMClient (strategy pattern, SPEC §8/§9)."""
 
     def __init__(self, model: str = MODEL) -> None:
         import anthropic  # deferred: only imported when this backend is actually selected
@@ -63,3 +84,19 @@ class AnthropicLLM:
 
     def explain(self, evidence: dict) -> str:
         return self._complete(_EXPLAIN_SYSTEM, evidence)
+
+    def converse(self, messages: list[dict], tools: list[dict], system: str) -> dict:
+        # SPEC §9.1's tool schema (name/description/input_schema) already
+        # matches Anthropic's own tool-definition shape — no translation needed.
+        response = self._client.messages.create(
+            model=self._model,
+            max_tokens=MAX_TOKENS,
+            system=system,
+            messages=_to_anthropic_messages(messages),
+            tools=tools,
+        )
+        tool_calls = [
+            {"id": b.id, "name": b.name, "input": b.input} for b in response.content if b.type == "tool_use"
+        ]
+        text = "".join(b.text for b in response.content if b.type == "text") or None
+        return {"stop_reason": "tool_use" if tool_calls else "end_turn", "tool_calls": tool_calls, "text": text}

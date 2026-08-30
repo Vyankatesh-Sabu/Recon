@@ -63,6 +63,18 @@ def migrate(
         conn.close()
 
 
+def latest_run_id(conn: sqlite3.Connection) -> str | None:
+    """The most recently finished run's id, or None if no run has completed.
+
+    Used by the Q&A tools (recon/llm/tools.py) so callers don't have to
+    thread a run_id through every question by hand.
+    """
+    row = conn.execute(
+        "SELECT run_id FROM runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1"
+    ).fetchone()
+    return row[0] if row else None
+
+
 if __name__ == "__main__":
     _applied = migrate()
     if _applied:

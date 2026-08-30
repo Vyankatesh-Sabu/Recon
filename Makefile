@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: setup generate load run report check demo
+.PHONY: setup generate load run report serve check demo
 
 # Idempotent: safe to re-run on an existing .venv (CLAUDE.md rule 4 — make
 # demo must work on main at every commit, including a clean checkout).
@@ -23,6 +23,9 @@ run: setup
 report: setup
 	$(PY) -m recon.cli report
 
+serve: setup
+	$(PY) -m recon.cli serve
+
 check: setup
 	$(PY) -m pytest -q
 
@@ -30,6 +33,7 @@ check: setup
 # at every commit (CLAUDE.md rule 4). `run` defaults to --llm off (CLAUDE.md
 # rule 5: never load-bearing) so demo never depends on an API key; the full
 # V3 -> hop1 -> hop2 -> hop3 -> verifier -> [tier4] -> V5 -> scorer pipeline
-# is complete as of P4.
+# is complete as of P4. `serve` (P5) additionally needs uvicorn installed —
+# see recon/cli.py's serve command for the fallback message if it's not.
 demo: generate load run report
-	@echo "demo: complete (full P4 pipeline; run with --llm on for tier4 adjudication)"
+	@echo "demo: complete (full P5 pipeline; run with --llm on for tier4; 'make serve' for the Q&A endpoint)"
