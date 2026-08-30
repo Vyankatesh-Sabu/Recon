@@ -244,7 +244,12 @@ def apply_d05(world: World, truth: GroundTruth, rng, ctx: _Ctx) -> None:
 
 
 def apply_d06(world: World, truth: GroundTruth, rng, ctx: _Ctx) -> None:
-    days = _business_days()
+    # Exclude days already restructured by a day-level defect (D-01/D-02/
+    # D-04/D-05/D-10/D-11/D-13): those defects' bank lines aren't named
+    # "setl_<day>", so is_settled()/resync_settlement() wouldn't notice a
+    # row added here and their carefully-built invariants would silently
+    # go stale.
+    days = [d for d in _business_days() if d not in ctx.used_days]
     for _ in range(config.DEFECT_COUNTS["D-06"]):
         day = rng.choice(days)
         method = rng.choice(["card", "upi", "nb"])
@@ -296,8 +301,18 @@ def apply_d07(world: World, truth: GroundTruth, rng, ctx: _Ctx) -> None:
 
 
 def apply_d08(world: World, truth: GroundTruth, rng, ctx: _Ctx) -> None:
+    # See apply_d06's comment: avoid both the original's day and the
+    # duplicate's day landing on a day already restructured elsewhere.
     captures = sorted(
-        (p for p in world.gw_payments if p.kind == "capture" and p.order_id and p.order_id not in ctx.used_orders),
+        (
+            p
+            for p in world.gw_payments
+            if p.kind == "capture"
+            and p.order_id
+            and p.order_id not in ctx.used_orders
+            and p.captured_on not in ctx.used_days
+            and busdays.add_bdays(p.captured_on, 1) not in ctx.used_days
+        ),
         key=lambda p: p.payment_id,
     )
     original = rng.choice(captures)
@@ -339,7 +354,14 @@ def apply_d08(world: World, truth: GroundTruth, rng, ctx: _Ctx) -> None:
 
 def apply_d09(world: World, truth: GroundTruth, rng, ctx: _Ctx) -> None:
     captures = sorted(
-        (p for p in world.gw_payments if p.kind == "capture" and p.order_id and p.order_id not in ctx.used_orders),
+        (
+            p
+            for p in world.gw_payments
+            if p.kind == "capture"
+            and p.order_id
+            and p.order_id not in ctx.used_orders
+            and p.captured_on not in ctx.used_days
+        ),
         key=lambda p: p.payment_id,
     )
     victim = rng.choice(captures)
@@ -368,6 +390,7 @@ def apply_d10(world: World, truth: GroundTruth, rng, ctx: _Ctx) -> None:
             if p.kind == "capture"
             and p.method == "card"
             and p.order_id not in ctx.used_orders
+            and p.captured_on not in ctx.used_days
             and is_settled(world, p.captured_on)
         ),
         key=lambda p: p.payment_id,
@@ -439,7 +462,14 @@ def apply_d11(world: World, truth: GroundTruth, rng, ctx: _Ctx) -> None:
 
 def apply_d12(world: World, truth: GroundTruth, rng, ctx: _Ctx) -> None:
     captures = sorted(
-        (p for p in world.gw_payments if p.kind == "capture" and p.order_id and p.order_id not in ctx.used_orders),
+        (
+            p
+            for p in world.gw_payments
+            if p.kind == "capture"
+            and p.order_id
+            and p.order_id not in ctx.used_orders
+            and p.captured_on not in ctx.used_days
+        ),
         key=lambda p: p.payment_id,
     )
     victim = rng.choice(captures)
