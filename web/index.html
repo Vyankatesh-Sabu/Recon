@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RECON-4</title>
+<style>
+  :root {
+    --ink: #1a1a1a; --muted: #666; --border: #ddd; --bg: #fafafa;
+    --crit: #b3261e; --warn: #8a5a00; --info: #1a5a8a; --ok: #1e7a34;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    margin: 0; padding: 2rem; background: var(--bg); color: var(--ink);
+    max-width: 980px; margin-inline: auto;
+  }
+  h1 { font-size: 1.3rem; margin-bottom: 0.1rem; }
+  .meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
+  .headline {
+    font-size: 2.2rem; font-weight: 700; margin: 0;
+  }
+  .headline.ok { color: var(--ok); }
+  .headline.bad { color: var(--crit); }
+  .headline-label { color: var(--muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .metrics-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 0.75rem; margin: 1.5rem 0; padding: 1rem; background: white;
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+  .metric .value { font-size: 1.2rem; font-weight: 600; }
+  .metric .label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  .clearing {
+    margin: 1rem 0; padding: 0.6rem 1rem; border-radius: 6px; font-size: 0.92rem;
+    border: 1px solid var(--border); background: white;
+  }
+  .clearing.ok { border-color: var(--ok); color: var(--ok); }
+  table { width: 100%; border-collapse: collapse; background: white; font-size: 0.88rem; }
+  th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.03em; }
+  td.amt { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.exc-row { cursor: pointer; }
+  tr.exc-row:hover { background: #f3f3f3; }
+  .sev { font-weight: 600; font-size: 0.78rem; padding: 0.1rem 0.4rem; border-radius: 3px; }
+  .sev-critical { color: white; background: var(--crit); }
+  .sev-warn { color: white; background: var(--warn); }
+  .sev-info { color: white; background: var(--info); }
+  tr.detail-row td { background: #f7f7f5; padding: 0.75rem 1rem; }
+  tr.detail-row.hidden { display: none; }
+  pre { margin: 0.4rem 0 0; white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; background: #fff; border: 1px solid var(--border); padding: 0.6rem; border-radius: 4px; }
+  .caret { display: inline-block; width: 1em; color: var(--muted); }
+  section { margin-top: 2rem; }
+  h2 { font-size: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  #chat-log { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1rem; }
+  .qa-pair { background: white; border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; }
+  .qa-pair .q { font-weight: 600; margin-bottom: 0.35rem; }
+  .qa-pair .ids { margin-top: 0.5rem; font-size: 0.78rem; color: var(--muted); }
+  .qa-pair .ids code { background: #eee; padding: 0.05rem 0.3rem; border-radius: 3px; margin-right: 0.25rem; }
+  #chat-form { display: flex; gap: 0.5rem; }
+  #chat-input { flex: 1; padding: 0.5rem 0.7rem; border: 1px solid var(--border); border-radius: 4px; font-size: 0.9rem; }
+  #chat-form button { padding: 0.5rem 1.1rem; border: none; border-radius: 4px; background: var(--ink); color: white; cursor: pointer; font-size: 0.9rem; }
+  #chat-form button:disabled { opacity: 0.5; cursor: default; }
+  .err { color: var(--crit); }
+</style>
+</head>
+<body>
+
+<h1>RECON-4 — reconciliation run</h1>
+<div class="meta" id="run-meta">loading…</div>
+
+<div>
+  <div class="headline-label">False-match rate</div>
+  <p class="headline" id="fmr">—</p>
+</div>
+
+<div class="metrics-grid" id="metrics-grid"></div>
+<div class="clearing" id="clearing">—</div>
+
+<section>
+  <h2>Exceptions <span id="exc-count" style="color:var(--muted); font-weight:normal;"></span></h2>
+  <table>
+    <thead>
+      <tr><th></th><th>Code</th><th>Severity</th><th>₹ at risk</th><th>Explanation</th></tr>
+    </thead>
+    <tbody id="exc-body"><tr><td colspan="5">loading…</td></tr></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Ask the reconciliation agent</h2>
+  <div id="chat-log"></div>
+  <form id="chat-form">
+    <input id="chat-input" type="text" placeholder="e.g. Trace ORD-1017 end to end" autocomplete="off">
+    <button type="submit">Ask</button>
+  </form>
+</section>
+
+<script>
+const fmt = p => (p < 0 ? "-" : "") + "₹" + (Math.abs(p) / 100).toLocaleString("en-IN", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const pct = f => (f * 100).toFixed(1) + "%";
+
+async function loadReport() {
+  const res = await fetch("/report");
+  const data = await res.json();
+  if (data.error) {
+    document.getElementById("run-meta").innerHTML = `<span class="err">${data.error}</span>`;
+    document.getElementById("exc-body").innerHTML = `<tr><td colspan="5">No run yet — run <code>make demo</code> first.</td></tr>`;
+    return;
+  }
+  const m = data.metrics;
+
+  document.getElementById("run-meta").textContent =
+    `run ${data.run_id} · seed ${data.seed} · llm=${data.llm_mode} · finished ${data.finished_at}`;
+
+  const fmrEl = document.getElementById("fmr");
+  fmrEl.textContent = pct(m.false_match_rate);
+  fmrEl.className = "headline " + (m.false_match_rate === 0 ? "ok" : "bad");
+
+  const metrics = [
+    ["Records", m.records_processed],
+    ["Runtime", m.runtime_s.toFixed(2) + "s"],
+    ["Hop match", `H1 ${m.hop_match.h1} · H2 ${m.hop_match.h2} · H3 ${m.hop_match.h3}`],
+    ["Full chain", pct(m.full_chain_rate)],
+    ["Link precision", pct(m.link_precision)],
+    ["Link recall", pct(m.link_recall)],
+    ["LLM calls", `${m.llm_calls.total} (${m.llm_calls.accepted} ok / ${m.llm_calls.rejected} rej / ${m.llm_calls.abstained} abst)`],
+    ["₹ at risk", fmt(m.amount_at_risk_p)],
+  ];
+  document.getElementById("metrics-grid").innerHTML = metrics.map(([label, value]) =>
+    `<div class="metric"><div class="value">${value}</div><div class="label">${label}</div></div>`
+  ).join("");
+
+  const clearingEl = document.getElementById("clearing");
+  const ok = m.residual_p !== undefined;
+  clearingEl.className = "clearing" + (ok ? " ok" : "");
+  clearingEl.textContent = ok
+    ? `Clearing control: GL residual ${fmt(m.residual_p)} == exception exposure ${fmt(m.residual_p)} ✓`
+    : "Clearing control: not available for this run.";
+
+  document.getElementById("exc-count").textContent =
+    `(${m.exceptions.open} open — ${m.exceptions.critical} critical / ${m.exceptions.warn} warn / ${m.exceptions.info} info)`;
+
+  const body = document.getElementById("exc-body");
+  body.innerHTML = "";
+  data.exceptions.forEach((exc, i) => {
+    const row = document.createElement("tr");
+    row.className = "exc-row";
+    row.innerHTML = `
+      <td class="caret">&#9656;</td>
+      <td>${exc.code}<div style="color:var(--muted); font-size:0.75rem;">${exc.exc_id}</div></td>
+      <td><span class="sev sev-${exc.severity}">${exc.severity}</span></td>
+      <td class="amt">${fmt(exc.amount_at_risk_p)}</td>
+      <td>${exc.explanation}</td>
+    `;
+    const detail = document.createElement("tr");
+    detail.className = "detail-row hidden";
+    const recordsList = exc.records.map(r => `<code>${r.src}:${r.id}</code>`).join(" ");
+    const evidenceHtml = exc.evidence
+      ? `<div><strong>Reconstruction evidence</strong></div><pre>${JSON.stringify(exc.evidence, null, 2)}</pre>`
+      : `<div style="color:var(--muted);">No reconstruction table for this exception — it's a refusal with nothing to attach one to (see explanation).</div>`;
+    detail.innerHTML = `<td colspan="5">
+      <div><strong>Records:</strong> ${recordsList}</div>
+      <div style="margin-top:0.4rem;"><strong>Suggested action:</strong> ${exc.suggested_action}</div>
+      <div style="margin-top:0.6rem;">${evidenceHtml}</div>
+    </td>`;
+    row.addEventListener("click", () => {
+      detail.classList.toggle("hidden");
+      row.querySelector(".caret").innerHTML = detail.classList.contains("hidden") ? "&#9656;" : "&#9662;";
+    });
+    body.appendChild(row);
+    body.appendChild(detail);
+  });
+}
+
+document.getElementById("chat-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = document.getElementById("chat-input");
+  const question = input.value.trim();
+  if (!question) return;
+  const button = e.target.querySelector("button");
+  button.disabled = true;
+  const log = document.getElementById("chat-log");
+  const pair = document.createElement("div");
+  pair.className = "qa-pair";
+  pair.innerHTML = `<div class="q">${question}</div><div class="a">thinking…</div>`;
+  log.appendChild(pair);
+  input.value = "";
+  try {
+    const res = await fetch("/ask", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({question}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : res.statusText);
+    const toolsHtml = data.tool_calls.length
+      ? `<div class="ids">tools: ${data.tool_calls.map(t => `<code>${t.name}</code>`).join(" ")}</div>` : "";
+    const idsHtml = data.record_ids.length
+      ? `<div class="ids">records: ${data.record_ids.map(id => `<code>${id}</code>`).join(" ")}</div>` : "";
+    pair.innerHTML = `<div class="q">${question}</div><div class="a">${data.answer}</div>${toolsHtml}${idsHtml}`;
+  } catch (err) {
+    pair.innerHTML = `<div class="q">${question}</div><div class="a err">Error: ${err.message}</div>`;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+loadReport();
+</script>
+</body>
+</html>

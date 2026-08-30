@@ -110,7 +110,18 @@ def answer_question(
     record_ids: set[str] = set()
 
     while True:
-        response = client.converse(messages, tools=TOOL_SCHEMAS, system=SYSTEM_PROMPT)
+        try:
+            response = client.converse(messages, tools=TOOL_SCHEMAS, system=SYSTEM_PROMPT)
+        except Exception as exc:
+            # CLAUDE.md rule 5: never load-bearing. A real provider can raise
+            # for reasons unrelated to the question (no API key, network
+            # error) — that must degrade to an honest answer, not crash the
+            # endpoint (same policy as recon/llm/adjudicator.py's retry loop).
+            return {
+                "answer": f"Could not reach the LLM to answer this ({exc}). The data itself is still queryable via the tools directly.",
+                "tool_calls": tool_calls_made,
+                "record_ids": sorted(record_ids),
+            }
 
         if response["stop_reason"] != "tool_use" or len(tool_calls_made) >= MAX_TOOL_CALLS:
             answer = response.get("text") or "The data does not show enough to answer this."

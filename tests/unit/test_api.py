@@ -67,3 +67,50 @@ def test_ask_endpoint_validates_request_body():
     client = TestClient(app)
     response = client.post("/ask", json={"not_question": "oops"})
     assert response.status_code == 422
+
+
+def test_report_endpoint_returns_metrics_and_exceptions_with_evidence(tmp_path: Path):
+    db_path = _seeded_db(tmp_path)
+    app.dependency_overrides[get_db_path] = lambda: db_path
+    try:
+        client = TestClient(app)
+        response = client.get("/report")
+        assert response.status_code == 200
+        body = response.json()
+        assert "error" not in body
+        assert body["metrics"]["false_match_rate"] == 0.0
+        assert len(body["exceptions"]) == body["metrics"]["exceptions"]["open"]
+        amounts = [e["amount_at_risk_p"] for e in body["exceptions"]]
+        assert amounts == sorted(amounts, reverse=True)
+        # a tier-2-resolved exception has no reconstruction evidence to attach at all... but
+        # a FEE_VARIANCE/GL_DECOMPOSITION_FAIL-style exception should carry one via its match_link
+        with_evidence = [e for e in body["exceptions"] if e["evidence"] is not None]
+        assert with_evidence, "expected at least one exception to carry match_link reconstruction evidence"
+        without_evidence_codes = {e["code"] for e in body["exceptions"] if e["evidence"] is None}
+        assert "AMBIGUOUS_SETTLEMENT" in without_evidence_codes  # a genuine refusal — nothing to attach
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_report_endpoint_no_run_yet(tmp_path: Path):
+    db_path = tmp_path / "empty.db"
+    from recon.db import migrate as _migrate
+
+    _migrate(db_path=db_path, migrations_dir=REPO_ROOT / "db" / "migrations")
+    app.dependency_overrides[get_db_path] = lambda: db_path
+    try:
+        client = TestClient(app)
+        response = client.get("/report")
+        assert response.status_code == 200
+        assert "error" in response.json()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_dashboard_is_served_at_slash_dashboard():
+    client = TestClient(app)
+    response = client.get("/dashboard/")
+    assert response.status_code == 200
+    assert "RECON-4" in response.text
+    assert "/report" in response.text
+    assert "/ask" in response.text
