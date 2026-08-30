@@ -1,21 +1,22 @@
 """cli.py — typer app: generate|load|run|report|serve (SPEC §2).
 
-P1: `generate` and `load` do real, deterministic, seeded work (SPEC §5, §6.1).
-`run`/`report`/`serve` are still P0 stubs — hop matching is P2.
+P2: `generate`, `load`, `run` (V3 -> hop1 -> hop2 -> verifier -> scorer), and
+`report` all do real work. `serve` is still a P0 stub — that's P5.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import typer
 
 import recon.db as db
+from recon.engine import pipeline
 from recon.generator import generate_world
 from recon.generator.io import write_csvs
 from recon.generator.truth import write_ground_truth
 from recon.loader import load_all
+from recon.report import report as report_module
 
 app = typer.Typer(help="RECON-4: four-way payment reconciliation agent.", no_args_is_help=True)
 
@@ -56,37 +57,29 @@ def load() -> None:
 
 
 @app.command()
-def run(llm: str = typer.Option("off", help="on|off — SPEC.md rule 5")) -> None:
-    """Run the matching pipeline: hop1 -> hop2 -> hop3 -> verifier -> (tier4) -> scorer."""
-    stages = "hop1 -> hop2 -> hop3 -> verifier"
-    if llm == "on":
-        stages += " -> tier4 adjudicator -> verifier"
-    stages += " -> scorer"
-    typer.echo(f"run: would execute {stages}, llm={llm} (SPEC.md §6) — not yet implemented")
+def run(
+    llm: str = typer.Option("off", help="on|off — SPEC.md rule 5 (tier4 isn't built yet; off is the only mode)"),
+) -> None:
+    """Run the matching pipeline: V3 -> hop1 -> hop2 -> verifier -> scorer (SPEC §6). hop3/tier4 land in P3/P4."""
+    ctx = pipeline.run_pipeline(llm_mode=llm)
+    m = ctx["metrics"]
+    typer.echo(
+        f"run: {ctx['run_id']} — {m['records_processed']} records, {m['runtime_s']:.2f}s, "
+        f"false-match rate {m['false_match_rate'] * 100:.1f}%, "
+        f"{m['exceptions']['open']} open exceptions. Run `recon.cli report` to render it."
+    )
 
 
 @app.command()
 def report() -> None:
-    """Render the run report (terminal, JSON, HTML) — stub prints zeroed metrics."""
-    stub_metrics = {
-        "seed": None,
-        "llm_mode": None,
-        "records_processed": 0,
-        "runtime_s": 0.0,
-        "llm_calls": {"total": 0, "accepted": 0, "rejected": 0, "abstained": 0},
-        "hop_match": {"h1": "0/0", "h2": "0/0", "h3": "0/0"},
-        "full_chain_rate": 0.0,
-        "link_precision": 0.0,
-        "link_recall": 0.0,
-        "false_match_rate": 0.0,
-        "exceptions": {"open": 0, "critical": 0, "warn": 0, "info": 0},
-        "amount_at_risk_p": 0,
-        "clearing_residual_p": 0,
-        "clearing_exposure_p": 0,
-    }
-    typer.echo("RECON-4 RUN (stub) · no run has been executed yet")
-    typer.echo(json.dumps(stub_metrics, indent=2))
-    typer.echo("report: real terminal/JSON/HTML rendering not yet implemented (SPEC.md §7)")
+    """Render the latest run's report — terminal (printed), JSON + HTML (written to data/)."""
+    ctx = pipeline.load_latest_run_context()
+    if ctx is None:
+        typer.echo("report: no completed run found — run `recon.cli run` first.")
+        raise typer.Exit(code=1)
+    typer.echo(report_module.render_terminal(ctx))
+    json_path, html_path = report_module.write_reports(ctx, DATA_DIR)
+    typer.echo(f"report: wrote {json_path} and {html_path}")
 
 
 @app.command()

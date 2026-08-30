@@ -27,7 +27,8 @@ check: setup
 	$(PY) -m pytest -q
 
 # demo = generate -> load -> run -> report (SPEC §1). Must exit 0 on main
-# at every commit (CLAUDE.md rule 4), even before those steps do anything
-# real — P0 stubs print what each stage would do.
+# at every commit (CLAUDE.md rule 4). As of P2: generate/load/run/report are
+# all real (V3 -> hop1 -> hop2 -> verifier -> scorer -> report); hop3/tier4
+# land in P3/P4.
 demo: generate load run report
-	@echo "demo: complete (stub pipeline — no real computation yet, SPEC.md §3 P0)"
+	@echo "demo: complete (P2 pipeline: hop1+hop2+verifier+scorer; hop3/tier4 land in P3/P4)"
