@@ -2,7 +2,12 @@
 
 Assumes `recon.cli load` has already run (schema migrated, data/*.csv
 loaded into the DB) — this module picks up from there: V3 -> hop1 -> hop2
--> verifier -> score. hop3/tier4 land in P3/P4; this is P2's full pipeline.
+-> hop3 -> verifier -> V5 -> score. tier4 lands in P4.
+
+If V5 (the clearing-account control) fails, `run_pipeline` lets
+verifier.ClearingControlFailure propagate uncaught — no partial `runs` row
+is marked finished, no report is generated. This control exists to catch
+OUR bugs; never catch-and-continue past it.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ from pathlib import Path
 
 import config
 from recon import db as recon_db
-from recon.engine import hop1, hop2, verifier
+from recon.engine import hop1, hop2, hop3, verifier
 from recon.scoring import scorer
 
 
@@ -70,55 +75,63 @@ def run_pipeline(
     seed: int = config.SEED,
     llm_mode: str = "off",
 ) -> dict:
-    """Run V3 -> hop1 -> hop2 -> verifier -> score against the loaded DB.
+    """Run V3 -> hop1 -> hop2 -> hop3 -> verifier -> V5 -> score against the loaded DB.
 
     Returns a run context dict (run_id, timing, metrics, top_exceptions,
     per-stage stats) that report.py renders. Writes the `runs` row itself.
+    Raises verifier.ClearingControlFailure (V5 mismatch) uncaught — no
+    `runs.finished_at` is set and no report context is returned in that case.
     """
     conn = recon_db.connect(db_path)
-    run_id = new_run_id(seed)
-    started_at = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "INSERT INTO runs (run_id, seed, started_at, llm_mode) VALUES (?, ?, ?, ?)",
-        (run_id, seed, started_at, llm_mode),
-    )
-    conn.commit()
+    try:
+        run_id = new_run_id(seed)
+        started_at = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO runs (run_id, seed, started_at, llm_mode) VALUES (?, ?, ?, ?)",
+            (run_id, seed, started_at, llm_mode),
+        )
+        conn.commit()
 
-    t0 = time.monotonic()
-    v3_violations = _write_v3_exceptions(conn, run_id)
-    hop1_stats = hop1.run_hop1(conn, run_id)
-    hop2_stats = hop2.run_hop2(conn, run_id)
-    verifier_stats = verifier.run_verifier(conn, run_id)
-    runtime_s = time.monotonic() - t0
+        t0 = time.monotonic()
+        v3_violations = _write_v3_exceptions(conn, run_id)
+        hop1_stats = hop1.run_hop1(conn, run_id)
+        hop2_stats = hop2.run_hop2(conn, run_id)
+        hop3_stats = hop3.run_hop3(conn, run_id)
+        verifier_stats = verifier.run_verifier(conn, run_id)
+        verifier.check_v5_clearing_control(conn, run_id)  # aborts (raises) on mismatch
+        runtime_s = time.monotonic() - t0
 
-    metrics = scorer.score(conn, run_id, ground_truth_path)
-    metrics["runtime_s"] = runtime_s
-    metrics["seed"] = seed
-    metrics["llm_mode"] = llm_mode
-    metrics["v3_violations"] = v3_violations
+        metrics = scorer.score(conn, run_id, ground_truth_path)
+        metrics["runtime_s"] = runtime_s
+        metrics["seed"] = seed
+        metrics["llm_mode"] = llm_mode
+        metrics["v3_violations"] = v3_violations
+        metrics["residual_p"] = verifier.compute_residual_p(conn)
 
-    finished_at = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "UPDATE runs SET finished_at = ?, metrics = ? WHERE run_id = ?",
-        (finished_at, json.dumps(metrics), run_id),
-    )
-    conn.commit()
+        finished_at = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE runs SET finished_at = ?, metrics = ? WHERE run_id = ?",
+            (finished_at, json.dumps(metrics), run_id),
+        )
+        conn.commit()
 
-    top_exceptions = _top_exceptions(conn, run_id)
-    conn.close()
+        top_exceptions = _top_exceptions(conn, run_id)
 
-    return {
-        "run_id": run_id,
-        "seed": seed,
-        "llm_mode": llm_mode,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "metrics": metrics,
-        "top_exceptions": top_exceptions,
-        "hop1_stats": hop1_stats,
-        "hop2_stats": hop2_stats,
-        "verifier_stats": verifier_stats,
-    }
+        return {
+            "run_id": run_id,
+            "seed": seed,
+            "llm_mode": llm_mode,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "metrics": metrics,
+            "top_exceptions": top_exceptions,
+            "hop1_stats": hop1_stats,
+            "hop2_stats": hop2_stats,
+            "hop3_stats": hop3_stats,
+            "verifier_stats": verifier_stats,
+        }
+    finally:
+        conn.close()
 
 
 def load_latest_run_context(db_path: Path | str = recon_db.DB_PATH) -> dict | None:

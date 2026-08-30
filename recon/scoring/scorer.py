@@ -45,15 +45,19 @@ def score(conn: sqlite3.Connection, run_id: str, ground_truth_path: Path | str) 
     for _hop, _sa, _ia, _sb, _ib, tier in accepted:
         tier_histogram[str(tier)] = tier_histogram.get(str(tier), 0) + 1
 
-    # full_chain_rate — P2 scope: h1+h2 only (hop3 lands in P3 and will
-    # extend this to the true 3-hop chain).
+    # full_chain_rate: order -> capture -> settlement -> GL, all 3 hops
+    # accepted (SPEC §7).
     hop1_accepted_orders = {ia for hop, _sa, ia, _sb, _ib, _t in accepted if hop == 1}
     hop2_accepted_payments = {ia for hop, _sa, ia, _sb, _ib, _t in accepted if hop == 2}
+    hop3_accepted_lines = {ia for hop, _sa, ia, _sb, _ib, _t in accepted if hop == 3}
     truth_order_to_payment = {a[1]: b[1] for hop, a, b in truth_links if hop == 1}
+    truth_payment_to_line = {a[1]: b[1] for hop, a, b in truth_links if hop == 2}
     fully_chained = sum(
         1
         for order_id, payment_id in truth_order_to_payment.items()
-        if order_id in hop1_accepted_orders and payment_id in hop2_accepted_payments
+        if order_id in hop1_accepted_orders
+        and payment_id in hop2_accepted_payments
+        and truth_payment_to_line.get(payment_id) in hop3_accepted_lines
     )
     full_chain_rate = (
         fully_chained / len(truth_order_to_payment) if truth_order_to_payment else 1.0

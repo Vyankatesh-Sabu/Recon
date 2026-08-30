@@ -186,26 +186,33 @@ def resync_settlement(world: World, day: date) -> None:
         return
     day_rows = [p for p in world.gw_payments if p.captured_on == day]
     captures_today = [p for p in day_rows if p.kind == "capture"]
+    chargebacks_today = [p for p in day_rows if p.kind == "chargeback"]
     net = moneymath.settlement_net_p([p.settlement_contribution_p for p in day_rows], [])
     assert net > 0, f"batch {line_id} resynced to a non-positive net {net}"
     bank_line.credit_p = net
     fee_total = sum(p.fee_p for p in captures_today)
     gst_total = sum(p.gst_p for p in captures_today)
-    receivable_total = sum(p.amount_p for p in day_rows)
+    # PG_RECEIVABLE only ever tracks captures/refunds (money the customer
+    # owed and either paid or was refunded). A chargeback is a direct hit
+    # to cash on an ALREADY-cleared receivable from some earlier, unrelated
+    # settlement — it doesn't touch PG_RECEIVABLE at all; it needs its own
+    # CHARGEBACK_LOSS debit line, or the voucher balances by silently
+    # (and wrongly) treating the chargeback as if it reduced this batch's
+    # receivable, which V5 would then have no way to explain.
+    receivable_total = sum(p.amount_p for p in day_rows if p.kind != "chargeback")
+    chargeback_total = sum(-p.amount_p for p in chargebacks_today)  # amount_p is negative
     settle_date = busdays.add_bdays(day, config.SETTLEMENT_LAG_BDAYS)
     voucher_no = f"V-{day:%Y%m%d}-SETL"
     world.remove_voucher(voucher_no)
-    add_voucher(
-        world,
-        voucher_no,
-        settle_date,
-        [
-            ("BANK", net, 0, "settlement"),
-            ("FEE_EXPENSE", fee_total, 0, "settlement"),
-            ("INPUT_GST", gst_total, 0, "settlement"),
-            ("PG_RECEIVABLE", 0, receivable_total, "settlement"),
-        ],
-    )
+    lines = [
+        ("BANK", net, 0, "settlement"),
+        ("FEE_EXPENSE", fee_total, 0, "settlement"),
+        ("INPUT_GST", gst_total, 0, "settlement"),
+    ]
+    if chargeback_total:
+        lines.append(("CHARGEBACK_LOSS", chargeback_total, 0, "settlement"))
+    lines.append(("PG_RECEIVABLE", 0, receivable_total, "settlement"))
+    add_voucher(world, voucher_no, settle_date, lines)
 
 
 def build_clean_world(rng) -> tuple[World, GroundTruth]:
@@ -353,7 +360,10 @@ def build_clean_world(rng) -> tuple[World, GroundTruth]:
 
         fee_total = sum(p.fee_p for p in captures_today)
         gst_total = sum(p.gst_p for p in captures_today)
-        receivable_total = sum(p.amount_p for p in day_rows)  # captures + signed refunds
+        # PG_RECEIVABLE tracks captures/refunds only (see resync_settlement's
+        # comment) — no chargebacks exist yet at this point in construction,
+        # but the filter is here for consistency with resync_settlement.
+        receivable_total = sum(p.amount_p for p in day_rows if p.kind != "chargeback")
         voucher_no = f"V-{day:%Y%m%d}-SETL"
         add_voucher(
             world,

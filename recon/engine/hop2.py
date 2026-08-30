@@ -137,14 +137,21 @@ def run_hop2(conn: sqlite3.Connection, run_id: str) -> Hop2Stats:
         in_transit_by_batch.setdefault(r["settlement_id"], []).append(r)
     for batch_id, batch_rows in sorted(in_transit_by_batch.items()):
         stats.in_transit_batches += 1
-        net = sum(r["net_p"] for r in batch_rows)
+        net = sum(r["net_p"] for r in batch_rows)  # informational: what the bank will eventually credit
+        # amount_at_risk_p is the GROSS receivable (Σamount_p, not net-of-
+        # fee) — this is what the day's CAP voucher actually debited to
+        # PG_RECEIVABLE and hasn't been credited back yet (V5 sums this
+        # exact field; using the net bank-settlement figure here would
+        # never reconcile against the GL-computed residual).
+        receivable_total = sum(r["amount_p"] for r in batch_rows)
         earliest_date = min(date.fromisoformat(r["captured_on"]) for r in batch_rows)
         add_exception(
             "UNSETTLED_IN_TRANSIT",
             [{"src": "gw", "id": r["payment_id"]} for r in batch_rows],
-            net,
+            receivable_total,
             earliest_date,
-            f"Batch {batch_id} ({len(batch_rows)} rows, net {net}p) is expected to settle after DATE_TO.",
+            f"Batch {batch_id} ({len(batch_rows)} rows, expected net {net}p) is expected to settle after DATE_TO; "
+            f"₹{receivable_total}p remains open in PG_RECEIVABLE until then.",
             "No action needed; will settle in a future period.",
         )
 

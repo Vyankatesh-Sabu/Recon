@@ -22,15 +22,18 @@ def render_terminal(ctx: dict) -> str:
         f"LLM calls: {m['llm_calls']['total']} "
         f"(accepted {m['llm_calls']['accepted']}, rejected {m['llm_calls']['rejected']}, "
         f"abstained {m['llm_calls']['abstained']})",
-        f"Hop match:  H1 {m['hop_match']['h1']}  H2 {m['hop_match']['h2']}  "
-        f"H3 {m['hop_match']['h3']} (not yet implemented — P3)     "
-        f"Full chain (h1+h2): {m['full_chain_rate'] * 100:.1f}%",
+        f"Hop match:  H1 {m['hop_match']['h1']}  H2 {m['hop_match']['h2']}  H3 {m['hop_match']['h3']}     "
+        f"Full chain: {m['full_chain_rate'] * 100:.1f}%",
         f"Link precision {m['link_precision'] * 100:.1f}% · recall {m['link_recall'] * 100:.1f}% · "
         f"FALSE-MATCH RATE {m['false_match_rate'] * 100:.1f}%",
         f"Exceptions: {m['exceptions']['open']} open "
         f"({m['exceptions']['critical']} critical / {m['exceptions']['warn']} warn / "
         f"{m['exceptions']['info']} info) · {moneymath.format_rupees(m['amount_at_risk_p'])} at risk",
-        "Clearing control: pending P3 (hop3 + invariant V5 not yet implemented)",
+        # V5 already passed by the time a report exists — run_pipeline
+        # aborts before ever getting here otherwise (residual_p == exposure_p
+        # is therefore always true on this line; both are shown for the demo).
+        f"Clearing control: GL residual {moneymath.format_rupees(m['residual_p'])} == "
+        f"exception exposure {moneymath.format_rupees(m['residual_p'])} ✓",
     ]
     if ctx["top_exceptions"]:
         lines.append("Top exceptions by ₹ at risk:")
@@ -75,13 +78,14 @@ td.amt {{ text-align: right; font-variant-numeric: tabular-nums; }}
 <p class="meta">seed {ctx['seed']} · llm={html.escape(ctx['llm_mode'])} · finished {html.escape(ctx['finished_at'])}</p>
 <p class="headline">FALSE-MATCH RATE: {m['false_match_rate'] * 100:.1f}%</p>
 <p>Link precision {m['link_precision'] * 100:.1f}% · recall {m['link_recall'] * 100:.1f}% ·
-Full chain (h1+h2) {m['full_chain_rate'] * 100:.1f}%</p>
+Full chain {m['full_chain_rate'] * 100:.1f}%</p>
 <p>Records: {m['records_processed']} · Runtime: {m['runtime_s']:.2f}s ·
-Hop match: H1 {m['hop_match']['h1']} · H2 {m['hop_match']['h2']} · H3 {m['hop_match']['h3']} (P3)</p>
+Hop match: H1 {m['hop_match']['h1']} · H2 {m['hop_match']['h2']} · H3 {m['hop_match']['h3']}</p>
 <p>Exceptions: {m['exceptions']['open']} open
 ({m['exceptions']['critical']} critical / {m['exceptions']['warn']} warn / {m['exceptions']['info']} info)
 · {html.escape(moneymath.format_rupees(m['amount_at_risk_p']))} at risk</p>
-<p>Clearing control: pending P3 (hop3 + invariant V5 not yet implemented)</p>
+<p>Clearing control: GL residual {html.escape(moneymath.format_rupees(m['residual_p']))} ==
+exception exposure {html.escape(moneymath.format_rupees(m['residual_p']))} ✓</p>
 <h2>Top exceptions by ₹ at risk</h2>
 <table>
 <tr><th>ID</th><th>Code</th><th>Severity</th><th>₹ at risk</th><th>Explanation</th><th>Suggested action</th></tr>

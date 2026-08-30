@@ -1,7 +1,7 @@
 """cli.py — typer app: generate|load|run|report|serve (SPEC §2).
 
-P2: `generate`, `load`, `run` (V3 -> hop1 -> hop2 -> verifier -> scorer), and
-`report` all do real work. `serve` is still a P0 stub — that's P5.
+P3: `generate`, `load`, `run` (V3 -> hop1 -> hop2 -> hop3 -> verifier -> V5
+-> scorer), and `report` all do real work. `serve` is still a P0 stub — P5.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def load() -> None:
 def run(
     llm: str = typer.Option("off", help="on|off — SPEC.md rule 5 (tier4 isn't built yet; off is the only mode)"),
 ) -> None:
-    """Run the matching pipeline: V3 -> hop1 -> hop2 -> verifier -> scorer (SPEC §6). hop3/tier4 land in P3/P4."""
+    """Run the matching pipeline: V3 -> hop1 -> hop2 -> hop3 -> verifier -> V5 -> scorer (SPEC §6). tier4 lands in P4."""
     ctx = pipeline.run_pipeline(llm_mode=llm)
     m = ctx["metrics"]
     typer.echo(
