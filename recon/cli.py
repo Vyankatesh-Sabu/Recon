@@ -1,38 +1,58 @@
 """cli.py — typer app: generate|load|run|report|serve (SPEC §2).
 
-P0: every command is a stub that prints what it would do. Nothing here
-computes anything real yet — that lands phase by phase per SPEC.md §3.
+P1: `generate` and `load` do real, deterministic, seeded work (SPEC §5, §6.1).
+`run`/`report`/`serve` are still P0 stubs — hop matching is P2.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import typer
 
-from recon.db import DB_PATH
+import recon.db as db
+from recon.generator import generate_world
+from recon.generator.io import write_csvs
+from recon.generator.truth import write_ground_truth
+from recon.loader import load_all
 
 app = typer.Typer(help="RECON-4: four-way payment reconciliation agent.", no_args_is_help=True)
 
+DATA_DIR = Path("data")
+
 
 @app.command()
-def generate(seed: int = 42) -> None:
-    """Build the synthetic world (clean + defects) and write data/*.csv + ground_truth.json."""
+def generate(
+    seed: int = 42,
+    defects: bool = typer.Option(True, "--defects/--no-defects", help="Inject SPEC §5.3 defects (default on)"),
+) -> None:
+    """Build the synthetic world and write data/*.csv + ground_truth.json (SPEC §5)."""
+    world, truth = generate_world(seed, defects=defects)
+    write_csvs(world, DATA_DIR)
+    write_ground_truth(truth, DATA_DIR / "ground_truth.json")
     typer.echo(
-        f"generate: would build the synthetic world at seed={seed} and write "
-        "data/orders.csv, data/gateway.csv, data/bank.csv, data/gl.csv, "
-        "data/ground_truth.json (SPEC.md §5) — not yet implemented"
+        f"generate: seed={seed} defects={'on' if defects else 'off'} — wrote "
+        f"{len(world.orders)} orders, {len(world.gw_payments)} gateway rows, "
+        f"{len(world.bank_lines)} bank lines, {len(world.gl_entries)} GL lines "
+        f"to {DATA_DIR}/ (+ ground_truth.json: {len(truth.links)} links, "
+        f"{len(truth.exceptions)} exceptions, {len(truth.in_transit)} in-transit)"
     )
 
 
 @app.command()
 def load() -> None:
-    """Normalise and load data/*.csv into the SQLite database (SPEC.md §6.1)."""
-    typer.echo(
-        f"load: would normalise and load data/orders.csv, data/gateway.csv, "
-        f"data/bank.csv, data/gl.csv into {DB_PATH} (SPEC.md §6.1) — not yet "
-        "implemented (run `python -m recon.db` to apply schema migrations)"
-    )
+    """Apply pending migrations, then normalise and load data/*.csv (SPEC §6.1)."""
+    applied = db.migrate()
+    if applied:
+        typer.echo(f"load: applied migrations: {', '.join(applied)}")
+    conn = db.connect()
+    try:
+        report = load_all(conn, DATA_DIR)
+    finally:
+        conn.close()
+    typer.echo(f"load: loaded {DATA_DIR}/*.csv into {db.DB_PATH}")
+    typer.echo(report.summary())
 
 
 @app.command()
