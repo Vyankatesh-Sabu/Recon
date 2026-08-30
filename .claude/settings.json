@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)", "Bash(python3:*)", "Bash(pytest:*)", "Bash(make:*)",
+      "Bash(pip:*)", "Bash(sqlite3:*)", "Bash(ls:*)", "Bash(cat:*)",
+      "Bash(mkdir:*)", "Bash(sha256sum:*)", "Bash(head:*)", "Bash(tail:*)",
+      "Bash(git status)", "Bash(git diff:*)", "Bash(git log:*)",
+      "Bash(git add:*)", "Bash(git commit:*)"
+    ],
+    "deny": ["Bash(rm -rf:*)", "Bash(git push:*)", "Bash(git reset --hard:*)"]
+  }
+}
