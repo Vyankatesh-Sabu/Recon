@@ -89,6 +89,79 @@ def test_d13_gl_duplicate(tmp_path: Path):
     assert n == 0
 
 
+def test_gl_ambiguous_match_refuses_not_guesses(tmp_path: Path):
+    """Regression test for a bug found via tests/eval_multi_seed.py: two
+    genuinely distinct GL vouchers (different FEE_EXPENSE/INPUT_GST/
+    PG_RECEIVABLE underneath — not a real duplicate) that coincidentally
+    share a BANK debit amount and date, exactly what D-02's twin
+    settlements produce. Before this fix hop3's amount+date voucher lookup
+    picked one arbitrarily and mislabeled the other a GL_DUPLICATE it
+    never was — doing so once per bank line that queried it, corrupting V5
+    (verifier.ClearingControlFailure on ~7% of random seeds).
+
+    Built directly against the schema (bypassing hop1/hop2/the generator)
+    so this exercises hop3's signature-comparison logic in isolation,
+    independent of whatever hop2.py's own cross-bank-line collision guard
+    (test_hop2.py's test_cross_bank_line_collision_refuses_both_seed_6)
+    does or doesn't happen to filter out first for a given seed."""
+    data_dir = tmp_path / "data"
+    world, _truth = generate_world(config.SEED, defects=False)  # just need a schema-valid base world
+    write_csvs(world, data_dir)
+    db_path = tmp_path / "recon.db"
+    migrate(db_path=db_path, migrations_dir=REPO_ROOT / "db" / "migrations")
+    conn = sqlite3.connect(db_path)
+    report = load_all(conn, data_dir)
+    assert report.quarantined == []
+    conn.execute(
+        "INSERT INTO runs (run_id, seed, started_at, llm_mode) VALUES (?, ?, datetime('now'), 'off')",
+        (RUN_ID, config.SEED),
+    )
+
+    # Two bank lines, identical credit + value_date (same shape as D-02).
+    for line_id in ("BL-TEST-X", "BL-TEST-Y"):
+        conn.execute(
+            "INSERT INTO bank_lines (line_id, value_date, narration, credit_p, debit_p, utr_extracted) "
+            "VALUES (?, '2026-08-11', 'test settlement', 100000, 0, NULL)",
+            (line_id,),
+        )
+    # Two vouchers with the SAME BANK debit and date, but DIFFERENT other
+    # lines underneath — genuinely distinct, not a byte-for-byte duplicate.
+    for voucher_no, fee_p, receivable_p in (("V-TEST-A", 1500, 101500), ("V-TEST-B", 2000, 102000)):
+        conn.execute(
+            "INSERT INTO gl_entries (voucher_no, line_no, entry_date, account, debit_p, credit_p, memo) VALUES "
+            "(?, 1, '2026-08-11', 'BANK', 100000, 0, 'test'), "
+            "(?, 2, '2026-08-11', 'FEE_EXPENSE', ?, 0, 'test'), "
+            "(?, 3, '2026-08-11', 'PG_RECEIVABLE', 0, ?, 'test')",
+            (voucher_no, voucher_no, fee_p, voucher_no, receivable_p),
+        )
+    # A hop2 'proposed' link into each bank line, so hop3's batch_payments
+    # dict picks both up (using two real capture rows from the clean world
+    # loaded above — their own amounts are irrelevant here since the
+    # ambiguity path returns before any decomposition check runs).
+    payment_ids = [r[0] for r in conn.execute("SELECT payment_id FROM gw_payments WHERE kind = 'capture' LIMIT 2")]
+    assert len(payment_ids) == 2
+    for seq, (payment_id, line_id) in enumerate(zip(payment_ids, ("BL-TEST-X", "BL-TEST-Y")), start=1):
+        conn.execute(
+            "INSERT INTO match_link (link_id, hop, src_a, id_a, src_b, id_b, tier, confidence, status, reason, evidence, run_id) "
+            "VALUES (?, 2, 'gw', ?, 'bank', ?, 1, 1.0, 'proposed', 'test_fixture', NULL, ?)",
+            (f"TEST-ML2-{seq}", payment_id, line_id, RUN_ID),
+        )
+    conn.commit()
+
+    stats = hop3.run_hop3(conn, RUN_ID)
+
+    assert stats.gl_ambiguous_match == 1  # reported exactly once, not once per bank line
+    exc_rows = conn.execute("SELECT records FROM exceptions WHERE code = 'GL_AMBIGUOUS_MATCH'").fetchall()
+    assert len(exc_rows) == 1
+
+    gl_records = json.loads(exc_rows[0][0])
+    voucher_ids = {r["id"] for r in gl_records if r["src"] == "gl"}
+    assert voucher_ids == {"V-TEST-A", "V-TEST-B"}  # both candidates named, neither silently dropped
+    for voucher_no in voucher_ids:
+        n = conn.execute("SELECT COUNT(*) FROM match_link WHERE hop = 3 AND id_b = ?", (voucher_no,)).fetchone()[0]
+        assert n == 0, f"{voucher_no} must have zero proposed hop3 links — refusal, not a guess"
+
+
 def test_d03_unlinked_refund(tmp_path: Path):
     conn = _seeded_db(tmp_path)
     stats = _run_hops(conn)

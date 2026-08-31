@@ -72,6 +72,13 @@ V5_INCLUSION_MAP: dict[str, int] = {
     #   and their Cr PG_RECEIVABLE together fully cancel the day's Dr —
     #   the ambiguity is purely about WHICH bank line pairs with which
     #   subset, not an accounting residual.
+    # GL_AMBIGUOUS_MATCH: same shape as AMBIGUOUS_SETTLEMENT one hop over —
+    #   every candidate voucher in the group still posted its own real Cr
+    #   PG_RECEIVABLE, and together they fully cancel the originating day's
+    #   Dr regardless of which specific bank line hop3 couldn't assign each
+    #   one to. Found via tests/eval_multi_seed.py (a genuine V5 abort on
+    #   ~7% of random seeds before this exclusion existed) — see hop3.py's
+    #   _voucher_signature for why this is a refusal, not a duplicate.
     # UNEXPLAINED_BANK_CREDIT: the clean-world GL entry behind this line is
     #   Dr BANK / Cr SALES — it never involves PG_RECEIVABLE.
     # CHARGEBACK_UNRESOLVED: a chargeback always gets its own CHARGEBACK_LOSS

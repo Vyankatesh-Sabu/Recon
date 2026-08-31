@@ -24,6 +24,7 @@ _SEVERITY = {
     "GL_DECOMPOSITION_FAIL": "warn",
     "GL_MISSING": "critical",
     "GL_DUPLICATE": "warn",
+    "GL_AMBIGUOUS_MATCH": "critical",
     "UNLINKED_REFUND": "warn",
     "CHARGEBACK_UNRESOLVED": "critical",
 }
@@ -35,10 +36,31 @@ class Hop3Stats:
     decomposition_fail: int = 0
     gl_missing: int = 0
     gl_duplicate: int = 0
+    gl_ambiguous_match: int = 0
     unlinked_refund: int = 0
     chargeback_unresolved: int = 0
     links_proposed: int = 0
     exceptions_by_code: dict[str, int] = field(default_factory=dict)
+
+
+def _voucher_signature(conn: sqlite3.Connection, voucher_no: str) -> tuple:
+    """Full GL content of a voucher, ignoring voucher_no/line_no/memo — two
+    vouchers with this signature equal are byte-for-byte the same journal
+    (D-13's real duplicate). Two vouchers that merely share a BANK debit
+    amount and date but differ here are genuinely distinct vouchers that
+    coincidentally collide (D-02's twin settlements: same net, same date,
+    but different FEE_EXPENSE/INPUT_GST/PG_RECEIVABLE underneath) — hop3
+    has no signal to tell which bank line owns which, and must refuse
+    rather than guess (CLAUDE.md rule 6), not call the second one a
+    "duplicate" it never was."""
+    return tuple(
+        sorted(
+            (account, debit_p, credit_p)
+            for account, debit_p, credit_p in conn.execute(
+                "SELECT account, debit_p, credit_p FROM gl_entries WHERE voucher_no = ?", (voucher_no,)
+            )
+        )
+    )
 
 
 def run_hop3(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = None) -> Hop3Stats:
@@ -50,6 +72,14 @@ def run_hop3(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
         nonlocal link_seq
         link_seq += 1
         return f"{run_id}-ML3-{link_seq:04d}"
+
+    # Guards against reporting the same finding twice: a voucher pair can be
+    # independently rediscovered by more than one bank line iteration (this
+    # is exactly how the GL_AMBIGUOUS_MATCH bug below was found — two
+    # bank lines with identical credit/date both re-query the same voucher
+    # pool and each, on its own, thinks it found something new).
+    reported_duplicate_vouchers: set[str] = set()
+    reported_ambiguous_groups: set[tuple[str, ...]] = set()
 
     def add_exception(code: str, records: list[dict], amount_at_risk_p: int, event_date: date, explanation: str, suggested_action: str) -> None:
         nonlocal exc_seq
@@ -151,8 +181,57 @@ def run_hop3(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
             )
             continue
 
-        chosen, *duplicates = voucher_nos
+        if len(voucher_nos) > 1:
+            # More than one voucher's BANK debit falls within tolerance and
+            # the date window. That's D-13's real duplicate case (a
+            # byte-for-byte copy) — but it's ALSO exactly what D-02's twin
+            # settlements look like from the GL side alone: two genuinely
+            # distinct vouchers (different FEE_EXPENSE/INPUT_GST/
+            # PG_RECEIVABLE underneath) that happen to share BANK amount
+            # and date because their bank lines do too. Only the first is a
+            # real duplicate; guessing on the second is exactly the false
+            # match CLAUDE.md rule 6 forbids. Full-content comparison
+            # (ignoring voucher_no/memo) tells the two cases apart.
+            signatures = {v: _voucher_signature(conn, v) for v in voucher_nos}
+            distinct_signatures = set(signatures.values())
+            if len(distinct_signatures) > 1:
+                # Structurally different vouchers coincidentally sharing an
+                # amount+date — hop3 has no signal to say which bank line
+                # owns which. Refuse for this bank line rather than pick
+                # one arbitrarily; report the ambiguous group once, no
+                # matter how many bank lines independently rediscover it.
+                group_key = tuple(voucher_nos)
+                if group_key not in reported_ambiguous_groups:
+                    reported_ambiguous_groups.add(group_key)
+                    stats.gl_ambiguous_match += 1
+                    total_receivable = sum(
+                        c
+                        for v in voucher_nos
+                        for a, _d, c in conn.execute(
+                            "SELECT account, debit_p, credit_p FROM gl_entries WHERE voucher_no = ?", (v,)
+                        )
+                        if a == "PG_RECEIVABLE"
+                    )
+                    add_exception(
+                        "GL_AMBIGUOUS_MATCH",
+                        [{"src": "gl", "id": v} for v in voucher_nos] + [{"src": "bank", "id": line_id}],
+                        total_receivable,
+                        value_date,
+                        f"{len(voucher_nos)} distinct GL vouchers ({', '.join(voucher_nos)}) all have a BANK "
+                        f"debit matching bank line {line_id} ({credit_p}p) within tolerance in the same "
+                        f"±{config.DATE_WINDOW_BDAYS}-bday window, and are NOT duplicates of each other "
+                        "(their other lines differ) — engine must refuse; picking any one would be a false match.",
+                        "Confirm which settlement voucher belongs to which bank line before posting further.",
+                    )
+                continue  # no hop3 link proposed for this bank line — refusal, not a guess
+            chosen, *duplicates = voucher_nos
+        else:
+            chosen, duplicates = voucher_nos[0], []
+
         for extra in duplicates:
+            if extra in reported_duplicate_vouchers:
+                continue
+            reported_duplicate_vouchers.add(extra)
             stats.gl_duplicate += 1
             extra_receivable = sum(
                 c
