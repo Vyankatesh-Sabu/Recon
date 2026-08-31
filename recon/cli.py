@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
+from dotenv import load_dotenv
 
 import recon.db as db
 from recon.engine import pipeline
@@ -17,6 +18,13 @@ from recon.generator.io import write_csvs
 from recon.generator.truth import write_ground_truth
 from recon.loader import load_all
 from recon.report import report as report_module
+
+# Loads .env (gitignored — see .env.example) into the environment before
+# any provider code reads ANTHROPIC_API_KEY/GEMINI_API_KEY/RECON_LLM_
+# PROVIDER. A no-op if .env doesn't exist or a var is already exported —
+# never overrides a real shell export (CLAUDE.md rule 8's approved
+# exception, confirmed with the user 2026-08-31).
+load_dotenv()
 
 app = typer.Typer(help="RECON-4: four-way payment reconciliation agent.", no_args_is_help=True)
 

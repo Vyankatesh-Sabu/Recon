@@ -42,6 +42,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -53,6 +54,11 @@ from recon.engine import pipeline, verifier
 from recon.llm import qa
 from recon.llm.client import LLMClient, create_llm_client
 from recon.llm.tools import trace_order
+
+# Same .env loading as cli.py — `recon.cli serve` imports this module, but
+# api.py is also importable directly (e.g. `uvicorn recon.api:app`), so it
+# loads .env itself rather than relying on cli.py having done it first.
+load_dotenv()
 
 app = FastAPI(title="RECON-4 Q&A")
 

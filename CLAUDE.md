@@ -51,6 +51,13 @@ treat this file as the non-negotiable "how".
    `web/index.html`/`/dashboard`/`/ask`/`/report` are left in place (not
    deleted) as of this note — they become throwaway once the new frontend
    ships, but nothing has removed them yet.
+   **Approved exception (confirmed with the user 2026-08-31):**
+   `python-dotenv` — `.env` (gitignored) holds `ANTHROPIC_API_KEY`/
+   `GEMINI_API_KEY`/`RECON_LLM_PROVIDER` so they survive across shell
+   sessions instead of being re-exported every time; `.env.example` is
+   committed as the template. `load_dotenv()` is called once, at the top
+   of `recon/cli.py` and `recon/api.py` (both entrypoints), before any
+   provider code reads the environment.
 
 9. **Phase gates in `tests/gates/` are mandatory.** Never start phase N+1
    before phase N's gate script passes. Never weaken a gate to make it pass.

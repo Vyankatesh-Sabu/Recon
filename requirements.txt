@@ -6,3 +6,7 @@ fastapi==0.141.1
 # P4: LLM provider SDKs behind recon/llm/client.py's strategy pattern.
 anthropic==1.2.0
 google-genai==2.20.0
+# .env support so ANTHROPIC_API_KEY/GEMINI_API_KEY/RECON_LLM_PROVIDER can
+# live in a gitignored .env instead of being re-exported every shell
+# session (confirmed with the user 2026-08-31).
+python-dotenv==1.2.3
