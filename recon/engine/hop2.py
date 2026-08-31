@@ -19,6 +19,7 @@ from datetime import date
 
 import config
 from recon import busdays, moneymath
+from recon.engine.events import OnEvent
 from recon.engine.subsetsum import Multiple, NoSolution, Unique, reconstruct
 
 _SEVERITY = {
@@ -67,7 +68,7 @@ def _row_dict(row: tuple) -> dict:
     }
 
 
-def run_hop2(conn: sqlite3.Connection, run_id: str) -> Hop2Stats:
+def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = None) -> Hop2Stats:
     stats = Hop2Stats()
     link_seq = 0
     exc_seq = 0
@@ -80,12 +81,13 @@ def run_hop2(conn: sqlite3.Connection, run_id: str) -> Hop2Stats:
     def add_exception(code: str, records: list[dict], amount_at_risk_p: int, event_date: date, explanation: str, suggested_action: str) -> None:
         nonlocal exc_seq
         exc_seq += 1
+        exc_id = f"{run_id}-EXC2-{exc_seq:04d}"
         conn.execute(
             "INSERT INTO exceptions "
             "(exc_id, run_id, code, severity, hop, records, amount_at_risk_p, age_days, explanation, suggested_action, status) "
             "VALUES (?, ?, ?, ?, 2, ?, ?, ?, ?, ?, 'open')",
             (
-                f"{run_id}-EXC2-{exc_seq:04d}",
+                exc_id,
                 run_id,
                 code,
                 _SEVERITY[code],
@@ -97,6 +99,18 @@ def run_hop2(conn: sqlite3.Connection, run_id: str) -> Hop2Stats:
             ),
         )
         stats.exceptions_by_code[code] = stats.exceptions_by_code.get(code, 0) + 1
+        if on_event is not None:
+            on_event(
+                {
+                    "kind": "exception",
+                    "hop": 2,
+                    "exc_id": exc_id,
+                    "code": code,
+                    "severity": _SEVERITY[code],
+                    "amount_at_risk_p": amount_at_risk_p,
+                    "records": records,
+                }
+            )
 
     def propose_link(payment_id: str, line_id: str, tier: int, confidence: float, reason: str, evidence: dict) -> None:
         conn.execute(

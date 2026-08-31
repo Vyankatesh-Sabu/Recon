@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 import config
 from recon import moneymath
+from recon.engine.events import OnEvent
 
 
 class ClearingControlFailure(RuntimeError):
@@ -211,19 +212,20 @@ def _verify_hop3(conn: sqlite3.Connection, id_a: str, id_b: str) -> tuple[bool, 
     return True, ""
 
 
-def run_verifier(conn: sqlite3.Connection, run_id: str) -> VerifierStats:
+def run_verifier(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = None) -> VerifierStats:
     stats = VerifierStats()
     exc_seq = 0
 
     def add_duplicate_claim(hop: int, records: list[dict], link_id: str) -> None:
         nonlocal exc_seq
         exc_seq += 1
+        exc_id = f"{run_id}-VEXC-{exc_seq:04d}"
         conn.execute(
             "INSERT INTO exceptions "
             "(exc_id, run_id, code, severity, hop, records, amount_at_risk_p, age_days, explanation, suggested_action, status) "
             "VALUES (?, ?, 'DUPLICATE_CLAIM', 'critical', ?, ?, 0, 0, ?, ?, 'open')",
             (
-                f"{run_id}-VEXC-{exc_seq:04d}",
+                exc_id,
                 run_id,
                 hop,
                 json.dumps(records),
@@ -231,11 +233,36 @@ def run_verifier(conn: sqlite3.Connection, run_id: str) -> VerifierStats:
                 "Investigate why two proposals claimed the same record; this should never happen by construction.",
             ),
         )
+        if on_event is not None:
+            on_event(
+                {
+                    "kind": "exception",
+                    "hop": hop,
+                    "exc_id": exc_id,
+                    "code": "DUPLICATE_CLAIM",
+                    "severity": "critical",
+                    "amount_at_risk_p": 0,
+                    "records": records,
+                }
+            )
 
-    def accept_or_reject(link_id: str, hop: int, src_a: str, id_a: str, src_b: str, id_b: str) -> None:
+    def accept_or_reject(
+        link_id: str, hop: int, src_a: str, id_a: str, src_b: str, id_b: str, tier: int | None = None
+    ) -> None:
         try:
             conn.execute("UPDATE match_link SET status = 'accepted' WHERE link_id = ?", (link_id,))
             stats.accepted += 1
+            if on_event is not None:
+                on_event(
+                    {
+                        "kind": "match",
+                        "hop": hop,
+                        "link_id": link_id,
+                        "tier": tier,
+                        "id_a": id_a,
+                        "id_b": id_b,
+                    }
+                )
         except sqlite3.IntegrityError:
             conn.execute(
                 "UPDATE match_link SET status = 'rejected', reason = 'V2_duplicate_claim' WHERE link_id = ?",
@@ -268,12 +295,12 @@ def run_verifier(conn: sqlite3.Connection, run_id: str) -> VerifierStats:
     hop3_links = [r for r in proposed if r[1] == 3]
 
     # --- hop 1: each link is independently verifiable ---
-    for link_id, hop, src_a, id_a, src_b, id_b, _tier in hop1_links:
+    for link_id, hop, src_a, id_a, src_b, id_b, tier in hop1_links:
         ok, reason = _verify_hop1(conn, id_a, id_b)
         if not ok:
             reject_v1(link_id, reason)
             continue
-        accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b)
+        accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b, tier)
 
     # --- hop 2: a batch (all rows sharing a bank line) is verified, then
     # accepted or rejected, atomically — a bank line's reconstruction is
@@ -291,16 +318,16 @@ def run_verifier(conn: sqlite3.Connection, run_id: str) -> VerifierStats:
             for link_id, *_ in links:
                 reject_v1(link_id, reason, tier=tier)
             continue
-        for link_id, hop, src_a, id_a, src_b, id_b, _tier in links:
-            accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b)
+        for link_id, hop, src_a, id_a, src_b, id_b, link_tier in links:
+            accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b, link_tier)
 
     # --- hop 3 (V4): each bank<->voucher pairing is independently verifiable ---
-    for link_id, hop, src_a, id_a, src_b, id_b, _tier in hop3_links:
+    for link_id, hop, src_a, id_a, src_b, id_b, tier in hop3_links:
         ok, reason = _verify_hop3(conn, id_a, id_b)
         if not ok:
             reject_v1(link_id, reason)
             continue
-        accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b)
+        accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b, tier)
 
     conn.commit()
     return stats

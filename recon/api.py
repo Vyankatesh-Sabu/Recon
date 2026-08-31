@@ -1,4 +1,5 @@
-"""api.py — FastAPI app exposing the Q&A endpoint (SPEC §9) and dashboard data (SPEC §10).
+"""api.py — FastAPI app: Q&A (SPEC §9), dashboard data (SPEC §10), and the
+run/streaming/reconstruction API added by the P6 UI supplement (§3).
 
 POST /ask {"question": str} -> {"answer": str, "tool_calls": [...], "record_ids": [...]}.
 GET  /report -> the latest run's metrics + full open-exception list, each
@@ -9,6 +10,23 @@ GET  /report -> the latest run's metrics + full open-exception list, each
     already says why).
 web/index.html is mounted at /dashboard (plain HTML + fetch, SPEC §10).
 
+P6 supplement §3 API surface (all additive — /ask, /report, /dashboard are
+untouched, existing tests keep passing):
+    POST /api/run                     -> {"run_id": str}, starts a pipeline
+                                          run in a background thread and
+                                          returns immediately.
+    GET  /api/run/{id}/stream         -> SSE: one "data: {...}\n\n" chunk per
+                                          match/exception event, in emission
+                                          order (recon/engine/events.py).
+    GET  /api/run/{id}/metrics        -> that run's `runs` row + metrics.
+    GET  /api/run/{id}/exceptions     -> that run's exceptions, filterable.
+    GET  /api/match/{link_id}         -> one match_link row, evidence parsed.
+    GET  /api/order/{order_id}/chain  -> recon.llm.tools.trace_order, as JSON.
+    GET  /api/control/clearing        -> V5's residual_p vs exposure_p.
+    POST /api/ask                     -> same as /ask, plus an optional
+                                          run_id to target a specific run
+                                          instead of always the latest.
+
 The LLM client and DB path are FastAPI dependencies specifically so tests
 (tests/unit/test_api.py) and gate_p5.py can override them with a MockLLM
 and a seeded temp database via `app.dependency_overrides`, without ever
@@ -17,17 +35,24 @@ touching a real provider or `data/recon.db`.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import queue
 import sqlite3
+import threading
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import config
 from recon import db as recon_db
+from recon.engine import pipeline, verifier
 from recon.llm import qa
 from recon.llm.client import LLMClient, create_llm_client
+from recon.llm.tools import trace_order
 
 app = FastAPI(title="RECON-4 Q&A")
 
@@ -38,6 +63,7 @@ if _WEB_DIR.is_dir():
 
 class AskRequest(BaseModel):
     question: str
+    run_id: str | None = None  # P6: target a specific run instead of always the latest
 
 
 class AskResponse(BaseModel):
@@ -86,10 +112,20 @@ def ask(
 ) -> AskResponse:
     conn = recon_db.connect(db_path)
     try:
-        result = qa.answer_question(conn, request.question, client)
+        result = qa.answer_question(conn, request.question, client, run_id=request.run_id)
         return AskResponse(**result)
     finally:
         conn.close()
+
+
+def _resolve_llm_client(provider: str | None) -> LLMClient:
+    """Same never-load-bearing fallback as get_llm_client(), but honoring an
+    explicit provider override (POST /api/run's body) instead of always
+    reading $RECON_LLM_PROVIDER."""
+    try:
+        return create_llm_client(provider)
+    except Exception:
+        return _UnconfiguredLLM()
 
 
 def _reconstruction_evidence(conn: sqlite3.Connection, run_id: str, records: list[dict]) -> dict | None:
@@ -150,5 +186,265 @@ def get_report(db_path: Path = Depends(get_db_path)) -> dict:
             "metrics": json.loads(metrics_json),
             "exceptions": exceptions,
         }
+    finally:
+        conn.close()
+
+
+# --- P6 supplement: run/streaming/reconstruction API ---------------------
+
+# run_id -> the queue its background pipeline thread is writing events to.
+# A run's queue is consumed (and popped) by whichever client GETs its
+# /stream first — Queue.get() is destructive, so this is single-reader by
+# construction; a second concurrent stream on the same run_id gets a 404
+# ("already consumed") rather than silently splitting the event feed. That
+# is a real limitation, acceptable for a single-viewer demo dashboard
+# within P6's timebox — not something a multi-viewer product could ship.
+# An entry is also left behind (and never cleaned up) if nobody ever opens
+# the stream for a completed run; harmless for a demo-length process.
+_run_queues: dict[str, "queue.Queue[dict | None]"] = {}
+
+
+class RunRequest(BaseModel):
+    seed: int = config.SEED
+    llm_mode: str = "off"  # CLAUDE.md rule 5: off always works, no key required
+    llm_provider: str | None = None  # anthropic|gemini; default $RECON_LLM_PROVIDER
+    pace_ms: int = 0
+
+
+class RunResponse(BaseModel):
+    run_id: str
+
+
+@app.post("/api/run", response_model=RunResponse)
+def start_run(request: RunRequest = RunRequest(), db_path: Path = Depends(get_db_path)) -> RunResponse:
+    """Start a pipeline run in a background thread; return its run_id
+    immediately so the caller can connect to GET /api/run/{run_id}/stream
+    before the first event fires. Runs against whatever is currently loaded
+    at db_path — this endpoint does not generate or load data itself."""
+    run_id = pipeline.new_run_id(request.seed)
+    q: "queue.Queue[dict | None]" = queue.Queue()
+    _run_queues[run_id] = q
+    llm_client = _resolve_llm_client(request.llm_provider) if request.llm_mode == "on" else None
+
+    def worker() -> None:
+        try:
+            pipeline.run_pipeline(
+                db_path=db_path,
+                seed=request.seed,
+                llm_mode=request.llm_mode,
+                llm_client=llm_client,
+                run_id=run_id,
+                on_event=q.put,
+                pace_ms=request.pace_ms,
+            )
+        except Exception as exc:
+            # Never let a pipeline failure (including V5's ClearingControlFailure)
+            # vanish silently — the stream's last event names it explicitly,
+            # instead of the connection just going quiet.
+            q.put({"kind": "error", "message": str(exc)})
+        finally:
+            q.put(None)  # sentinel: tells /stream the run is over
+
+    threading.Thread(target=worker, daemon=True).start()
+    return RunResponse(run_id=run_id)
+
+
+@app.get("/api/run/{run_id}/stream")
+async def stream_run(run_id: str) -> StreamingResponse:
+    """SSE: one `data: {...}\\n\\n` chunk per match/exception event, in
+    emission order, terminated by the worker thread's sentinel. Blocking
+    `queue.Queue.get()` is run off the event loop via asyncio.to_thread so
+    it doesn't stall other requests while waiting."""
+    q = _run_queues.get(run_id)
+    if q is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no active run stream for {run_id} — either it was never started via POST /api/run, "
+            "or its stream was already consumed by another connection.",
+        )
+
+    async def event_source():
+        try:
+            while True:
+                item = await asyncio.to_thread(q.get)
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+        finally:
+            _run_queues.pop(run_id, None)
+
+    return StreamingResponse(event_source(), media_type="text/event-stream")
+
+
+@app.get("/api/run/{run_id}/metrics")
+def get_run_metrics(run_id: str, db_path: Path = Depends(get_db_path)) -> dict:
+    conn = recon_db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT seed, started_at, finished_at, llm_mode, metrics FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+        seed, started_at, finished_at, llm_mode, metrics_json = row
+        return {
+            "run_id": run_id,
+            "seed": seed,
+            "llm_mode": llm_mode,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "status": "finished" if finished_at else "running",
+            "metrics": json.loads(metrics_json) if metrics_json else None,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/run/{run_id}/exceptions")
+def get_run_exceptions(
+    run_id: str,
+    hop: int | None = None,
+    code: str | None = None,
+    severity: str | None = None,
+    db_path: Path = Depends(get_db_path),
+) -> dict:
+    conn = recon_db.connect(db_path)
+    try:
+        if conn.execute("SELECT 1 FROM runs WHERE run_id = ?", (run_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+
+        query = (
+            "SELECT exc_id, code, severity, hop, records, amount_at_risk_p, age_days, "
+            "explanation, suggested_action, status FROM exceptions WHERE run_id = ?"
+        )
+        params: list = [run_id]
+        if hop is not None:
+            query += " AND hop = ?"
+            params.append(hop)
+        if code is not None:
+            query += " AND code = ?"
+            params.append(code)
+        if severity is not None:
+            query += " AND severity = ?"
+            params.append(severity)
+        query += " ORDER BY amount_at_risk_p DESC"
+
+        exceptions = []
+        for (
+            exc_id,
+            code_,
+            severity_,
+            hop_,
+            records_json,
+            amount_at_risk_p,
+            age_days,
+            explanation,
+            suggested_action,
+            status,
+        ) in conn.execute(query, params):
+            records = json.loads(records_json)
+            exceptions.append(
+                {
+                    "exc_id": exc_id,
+                    "code": code_,
+                    "severity": severity_,
+                    "hop": hop_,
+                    "records": records,
+                    "amount_at_risk_p": amount_at_risk_p,
+                    "age_days": age_days,
+                    "explanation": explanation,
+                    "suggested_action": suggested_action,
+                    "status": status,
+                    "evidence": _reconstruction_evidence(conn, run_id, records),
+                }
+            )
+        return {"run_id": run_id, "exceptions": exceptions}
+    finally:
+        conn.close()
+
+
+@app.get("/api/match/{link_id}")
+def get_match(link_id: str, db_path: Path = Depends(get_db_path)) -> dict:
+    conn = recon_db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT link_id, run_id, hop, src_a, id_a, src_b, id_b, tier, confidence, status, reason, evidence "
+            "FROM match_link WHERE link_id = ?",
+            (link_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"no such match_link: {link_id}")
+        link_id_, run_id, hop, src_a, id_a, src_b, id_b, tier, confidence, status, reason, evidence_json = row
+        return {
+            "link_id": link_id_,
+            "run_id": run_id,
+            "hop": hop,
+            "src_a": src_a,
+            "id_a": id_a,
+            "src_b": src_b,
+            "id_b": id_b,
+            "tier": tier,
+            "confidence": confidence,
+            "status": status,
+            "reason": reason,
+            "evidence": json.loads(evidence_json) if evidence_json else None,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/order/{order_id}/chain")
+def get_order_chain(order_id: str, run_id: str | None = None, db_path: Path = Depends(get_db_path)) -> dict:
+    """Thin wrapper around recon.llm.tools.trace_order — the SAME grounded
+    lookup the Q&A agent's trace_order tool uses, exposed directly for a
+    UI chain-explorer screen that doesn't need an LLM in the loop at all."""
+    conn = recon_db.connect(db_path)
+    try:
+        result = trace_order(conn, order_id, run_id=run_id)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/control/clearing")
+def get_clearing_control(run_id: str | None = None, db_path: Path = Depends(get_db_path)) -> dict:
+    """V5's residual_p (from gl_entries alone) vs exposure_p (from the
+    signed exception inclusion map) — the same two numbers `recon.cli
+    report` prints under "Clearing control", as JSON for the UI's control
+    screen (P6 supplement §2.6)."""
+    conn = recon_db.connect(db_path)
+    try:
+        if run_id is None:
+            run_id = recon_db.latest_run_id(conn)
+        if run_id is None:
+            raise HTTPException(status_code=404, detail="no completed run found — run POST /api/run first")
+        residual_p = verifier.compute_residual_p(conn)
+        exposure_p, breakdown = verifier.compute_exposure_p(conn, run_id)
+        return {
+            "run_id": run_id,
+            "residual_p": residual_p,
+            "exposure_p": exposure_p,
+            "balanced": residual_p == exposure_p,
+            "breakdown": breakdown,
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/api/ask", response_model=AskResponse)
+def api_ask(
+    request: AskRequest,
+    client: LLMClient = Depends(get_llm_client),
+    db_path: Path = Depends(get_db_path),
+) -> AskResponse:
+    """Same grounded Q&A loop as POST /ask, namespaced under /api for the
+    new frontend — identical behavior, kept as a separate route (rather
+    than replacing /ask) so the existing dashboard and its tests are
+    untouched."""
+    conn = recon_db.connect(db_path)
+    try:
+        result = qa.answer_question(conn, request.question, client, run_id=request.run_id)
+        return AskResponse(**result)
     finally:
         conn.close()
