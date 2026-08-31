@@ -19,6 +19,7 @@ from datetime import date
 
 import config
 from recon import busdays, moneymath
+from recon.engine.events import OnEvent
 from recon.engine.subsetsum import Multiple, NoSolution, Unique, reconstruct
 
 _SEVERITY = {
@@ -36,6 +37,7 @@ class Hop2Stats:
     tier1_fee_variance_batches: int = 0
     tier2_unique: int = 0
     tier2_ambiguous: int = 0
+    tier2_cross_collision: int = 0
     tier2_unexplained_credit: int = 0
     missing_in_bank: int = 0
     in_transit_batches: int = 0
@@ -67,7 +69,7 @@ def _row_dict(row: tuple) -> dict:
     }
 
 
-def run_hop2(conn: sqlite3.Connection, run_id: str) -> Hop2Stats:
+def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = None) -> Hop2Stats:
     stats = Hop2Stats()
     link_seq = 0
     exc_seq = 0
@@ -80,12 +82,13 @@ def run_hop2(conn: sqlite3.Connection, run_id: str) -> Hop2Stats:
     def add_exception(code: str, records: list[dict], amount_at_risk_p: int, event_date: date, explanation: str, suggested_action: str) -> None:
         nonlocal exc_seq
         exc_seq += 1
+        exc_id = f"{run_id}-EXC2-{exc_seq:04d}"
         conn.execute(
             "INSERT INTO exceptions "
             "(exc_id, run_id, code, severity, hop, records, amount_at_risk_p, age_days, explanation, suggested_action, status) "
             "VALUES (?, ?, ?, ?, 2, ?, ?, ?, ?, ?, 'open')",
             (
-                f"{run_id}-EXC2-{exc_seq:04d}",
+                exc_id,
                 run_id,
                 code,
                 _SEVERITY[code],
@@ -97,6 +100,18 @@ def run_hop2(conn: sqlite3.Connection, run_id: str) -> Hop2Stats:
             ),
         )
         stats.exceptions_by_code[code] = stats.exceptions_by_code.get(code, 0) + 1
+        if on_event is not None:
+            on_event(
+                {
+                    "kind": "exception",
+                    "hop": 2,
+                    "exc_id": exc_id,
+                    "code": code,
+                    "severity": _SEVERITY[code],
+                    "amount_at_risk_p": amount_at_risk_p,
+                    "records": records,
+                }
+            )
 
     def propose_link(payment_id: str, line_id: str, tier: int, confidence: float, reason: str, evidence: dict) -> None:
         conn.execute(
@@ -238,10 +253,28 @@ def run_hop2(conn: sqlite3.Connection, run_id: str) -> Hop2Stats:
             propose_link(r["payment_id"], line_id, tier=1, confidence=1.0, reason="tier1_fee_variance", evidence=evidence)
 
     # --- tier 2: UTR unusable, driven by unmatched credit bank lines ---
+    #
+    # Two-pass by design. Each bank line's reconstruct() call only sees ITS
+    # OWN candidate pool, so a "Unique" result only means "no second subset
+    # sums to THIS line's target from THIS pool" — it says nothing about
+    # whether some OTHER unmatched line, independently, resolves to the
+    # exact same candidate(s). That happens whenever two bank lines share a
+    # credit_p (D-02's twin settlements are built to do exactly this): a
+    # single row can trivially and correctly "uniquely" satisfy BOTH lines'
+    # targets on its own. Accepting either arbitrarily is a genuine false
+    # match (found via tests/eval_multi_seed.py — seed 6 among others,
+    # verifier's V2 unique-claim index would only reject the SECOND such
+    # proposal, silently keeping the first). Pass 1 computes every line's
+    # result without proposing anything; pass 2 checks each Unique result's
+    # members against every other line's Unique members before proposing —
+    # a collision demotes ALL colliding lines to a refusal (AMBIGUOUS_
+    # SETTLEMENT), never picks a "first past the post" winner.
     matched_utrs = {batch_rows[0]["utr"] for batch_rows in tier1_groups.values()}
     unmatched_lines = sorted(
         (bl for bl in credit_lines.values() if bl[5] not in matched_utrs), key=lambda bl: bl[0]
     )
+
+    pass1: list[dict] = []
     for line_id, value_date_s, narration, credit_p, debit_p, utr_extracted in unmatched_lines:
         value_date = date.fromisoformat(value_date_s)
         pool = [
@@ -256,8 +289,61 @@ def run_hop2(conn: sqlite3.Connection, run_id: str) -> Hop2Stats:
         items = [(r["payment_id"], r["net_p"]) for r in pool]
         result = reconstruct(credit_p, items, config.AMOUNT_TOL_P, config.SUBSET_MAX_ITEMS)
         pool_evidence = [{"id": r["payment_id"], "captured_on": r["captured_on"], "net_p": r["net_p"]} for r in pool]
+        pass1.append(
+            {
+                "line_id": line_id,
+                "value_date": value_date,
+                "credit_p": credit_p,
+                "narration": narration,
+                "pool": pool,
+                "pool_evidence": pool_evidence,
+                "result": result,
+            }
+        )
+
+    claimants: dict[str, list[str]] = {}
+    for entry in pass1:
+        if isinstance(entry["result"], Unique):
+            for pid, _ in entry["result"].subset:
+                claimants.setdefault(pid, []).append(entry["line_id"])
+
+    for entry in pass1:
+        line_id = entry["line_id"]
+        value_date = entry["value_date"]
+        credit_p = entry["credit_p"]
+        narration = entry["narration"]
+        pool = entry["pool"]
+        pool_evidence = entry["pool_evidence"]
+        result = entry["result"]
 
         if isinstance(result, Unique):
+            colliding_lines = sorted(
+                {other for pid, _ in result.subset for other in claimants[pid] if other != line_id}
+            )
+            if colliding_lines:
+                stats.tier2_cross_collision += 1
+                evidence = {
+                    "tier": 2,
+                    "target_p": credit_p,
+                    "candidate_pool": pool_evidence,
+                    "subset": [{"id": pid, "net_p": v} for pid, v in result.subset],
+                    "colliding_lines": colliding_lines,
+                    "tolerance_p": config.AMOUNT_TOL_P,
+                }
+                add_exception(
+                    "AMBIGUOUS_SETTLEMENT",
+                    [{"src": "bank", "id": line_id}],
+                    credit_p,
+                    value_date,
+                    f"Bank line {line_id} (credit {credit_p}p) reconstructs uniquely to "
+                    f"{[pid for pid, _ in result.subset]}, but the same row(s) also uniquely resolve "
+                    f"bank line(s) {colliding_lines} — a gateway row can't belong to two settlements; "
+                    "engine must refuse rather than guess which one it is.",
+                    "Confirm settlement ID in gateway dashboard.",
+                )
+                stats.evidence_log.append({"outcome": "tier2_cross_collision", "bank_line": line_id, "evidence": evidence})
+                continue
+
             subtotal = sum(v for _, v in result.subset)
             evidence = {
                 "tier": 2,

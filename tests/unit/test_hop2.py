@@ -78,6 +78,41 @@ def test_d02_refuses(tmp_path: Path):
     assert referenced == set(d02_lines)
 
 
+def test_cross_bank_line_collision_refuses_both_seed_6(tmp_path: Path):
+    """Regression test: found via tests/eval_multi_seed.py (100-seed sweep)
+    — seed 6's D-02 places a single-row candidate (its isolated UPI row)
+    that, on its own, exactly satisfies BOTH twin bank lines' identical
+    credit_p. Each line's OWN subset-sum call independently reports
+    "Unique" (neither sees the other's pool), so before this fix hop2
+    proposed the SAME payment to two different bank lines and the verifier
+    arbitrarily accepted whichever reached the DB first — a genuine false
+    match (nonzero false_match_rate), not merely a duplicate-claim retry.
+    The fix must refuse for BOTH lines instead of picking a winner."""
+    seed = 6
+    data_dir = tmp_path / "data"
+    world, _truth = generate_world(seed, defects=True)
+    write_csvs(world, data_dir)
+    db_path = tmp_path / "recon.db"
+    migrate(db_path=db_path, migrations_dir=REPO_ROOT / "db" / "migrations")
+    conn = sqlite3.connect(db_path)
+    report = load_all(conn, data_dir)
+    assert report.quarantined == []
+    conn.execute(
+        "INSERT INTO runs (run_id, seed, started_at, llm_mode) VALUES (?, ?, datetime('now'), 'off')",
+        (RUN_ID, seed),
+    )
+    conn.commit()
+
+    stats = run_hop2(conn, RUN_ID)
+    assert stats.tier2_cross_collision >= 1
+
+    d02_lines = [row[0] for row in conn.execute("SELECT line_id FROM bank_lines WHERE line_id LIKE 'bl_d02_%'")]
+    assert len(d02_lines) == 2
+    for line_id in d02_lines:
+        n = conn.execute("SELECT COUNT(*) FROM match_link WHERE id_b = ?", (line_id,)).fetchone()[0]
+        assert n == 0, f"{line_id} must have zero proposed links — refusal, not a false match"
+
+
 def test_d10_fee_variance_detected_link_still_proposed(tmp_path: Path):
     from recon import moneymath
 

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 import config
+from recon.engine.events import OnEvent
 
 # SPEC §5.3: every code hop1 can raise is severity "warn".
 _SEVERITY = "warn"
@@ -78,7 +79,7 @@ def _insert_exception(
     )
 
 
-def run_hop1(conn: sqlite3.Connection, run_id: str) -> Hop1Stats:
+def run_hop1(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = None) -> Hop1Stats:
     """Run hop-1 order<->capture matching (SPEC §6.2) and commit the results."""
     stats = Hop1Stats()
     link_seq = 0
@@ -89,8 +90,21 @@ def run_hop1(conn: sqlite3.Connection, run_id: str) -> Hop1Stats:
         exc_seq += 1
         explanation = _EXPLANATIONS[code].format(**fmt)
         suggested_action = _SUGGESTED_ACTIONS[code].format(**fmt)
+        exc_id = f"{run_id}-EXC-{exc_seq:04d}"
         _insert_exception(conn, run_id, exc_seq, code, records, amount_at_risk_p, event_date, explanation, suggested_action)
         stats.exceptions_by_code[code] = stats.exceptions_by_code.get(code, 0) + 1
+        if on_event is not None:
+            on_event(
+                {
+                    "kind": "exception",
+                    "hop": 1,
+                    "exc_id": exc_id,
+                    "code": code,
+                    "severity": _SEVERITY,
+                    "amount_at_risk_p": amount_at_risk_p,
+                    "records": records,
+                }
+            )
 
     orders = conn.execute("SELECT order_id, amount_p, method, status, created_on FROM orders").fetchall()
     captures = conn.execute(

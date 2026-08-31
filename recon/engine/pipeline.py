@@ -31,6 +31,7 @@ from pathlib import Path
 import config
 from recon import db as recon_db
 from recon.engine import hop1, hop2, hop3, verifier
+from recon.engine.events import OnEvent
 from recon.scoring import scorer
 
 
@@ -84,6 +85,9 @@ def run_pipeline(
     seed: int = config.SEED,
     llm_mode: str = "off",
     llm_client: object | None = None,
+    run_id: str | None = None,
+    on_event: OnEvent | None = None,
+    pace_ms: int = 0,
 ) -> dict:
     """Run V3 -> hop1 -> hop2 -> hop3 -> verifier -> [tier4 -> verifier] -> V5 -> score.
 
@@ -92,6 +96,16 @@ def run_pipeline(
     `RECON_LLM_PROVIDER`/API-key env vars via `recon.llm.client.create_llm_client`).
     Ignored when `llm_mode=='off'` — recon.llm is never even imported in that case.
 
+    `run_id`: pre-supplied instead of generated (P6 supplement §3 — the API's
+    POST /api/run must hand the caller a run_id before the pipeline starts,
+    so it can connect to GET /api/run/{id}/stream before the first event).
+    `on_event`: called for every "exception" (each hop's own add_exception)
+    and "match" (verifier.accept_or_reject, the sole place status='accepted'
+    is ever set) event, in emission order, with a "seq" and this "run_id"
+    stamped on. `pace_ms`: sleep that many milliseconds after each event
+    (CLI `--pace`) — 0 (default) means "as fast as possible," matching every
+    existing caller's behaviour exactly.
+
     Returns a run context dict (run_id, timing, metrics, top_exceptions,
     per-stage stats) that report.py renders. Writes the `runs` row itself.
     Raises verifier.ClearingControlFailure (V5 mismatch) uncaught — no
@@ -99,7 +113,19 @@ def run_pipeline(
     """
     conn = recon_db.connect(db_path)
     try:
-        run_id = new_run_id(seed)
+        if run_id is None:
+            run_id = new_run_id(seed)
+        seq = 0
+
+        def emit(event: dict) -> None:
+            nonlocal seq
+            if on_event is None:
+                return
+            seq += 1
+            on_event({**event, "seq": seq, "run_id": run_id})
+            if pace_ms:
+                time.sleep(pace_ms / 1000)
+
         started_at = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT INTO runs (run_id, seed, started_at, llm_mode) VALUES (?, ?, ?, ?)",
@@ -109,10 +135,10 @@ def run_pipeline(
 
         t0 = time.monotonic()
         v3_violations = _write_v3_exceptions(conn, run_id)
-        hop1_stats = hop1.run_hop1(conn, run_id)
-        hop2_stats = hop2.run_hop2(conn, run_id)
-        hop3_stats = hop3.run_hop3(conn, run_id)
-        verifier.run_verifier(conn, run_id)  # 1st pass: hop1/hop2/hop3 proposals
+        hop1_stats = hop1.run_hop1(conn, run_id, on_event=emit)
+        hop2_stats = hop2.run_hop2(conn, run_id, on_event=emit)
+        hop3_stats = hop3.run_hop3(conn, run_id, on_event=emit)
+        verifier.run_verifier(conn, run_id, on_event=emit)  # 1st pass: hop1/hop2/hop3 proposals
 
         tier4_stats = None
         narrated = 0
@@ -122,7 +148,7 @@ def run_pipeline(
 
             client = llm_client if llm_client is not None else create_llm_client()
             tier4_stats = adjudicator.run_tier4(conn, run_id, hop2_stats.evidence_log, client)
-            verifier.run_verifier(conn, run_id)  # 2nd pass: tier-4 proposals only
+            verifier.run_verifier(conn, run_id, on_event=emit)  # 2nd pass: tier-4 proposals only
             adjudicator.finalize_tier4_stats(conn, run_id, tier4_stats)
             adjudicator.resolve_exceptions_for_accepted_tier4(conn, run_id)
             narrated = adjudicator.narrate_exceptions(conn, run_id, client)

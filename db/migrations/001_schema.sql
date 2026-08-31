@@ -106,5 +106,10 @@ CREATE TABLE runs (
 -- needs no exception. It is one_claim_b that must exclude hop 2, or the
 -- second-through-Nth payment in every settlement batch would fail with a
 -- spurious UniqueViolation.
+-- NOTE: superseded by 002_v2_scope_by_run.sql, which adds run_id to both
+-- indexes (a real bug: unscoped, a second run against the same DB treated
+-- its own fresh proposals as duplicate claims against the FIRST run's
+-- already-accepted rows). This file is left as originally written — the
+-- history of what P0 actually shipped — rather than edited in place.
 CREATE UNIQUE INDEX one_claim_a ON match_link (src_a, id_a, hop) WHERE status = 'accepted';
 CREATE UNIQUE INDEX one_claim_b ON match_link (src_b, id_b, hop) WHERE status = 'accepted' AND hop <> 2;

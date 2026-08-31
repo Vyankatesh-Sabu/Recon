@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+/* Self-hosted (not Google Fonts CDN) — deliberate: the video shot list
+   (UI_SPEC.md §5) depends on a clean recording, so nothing here should be
+   able to hiccup on network during a take. */
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+
+/* UI_SPEC.md §1 — the ledger sheet. One accent family, used semantically
+   only; nothing here is decorative. */
+:root {
+  --ink: #0e1116; /* page ground */
+  --rule: #1e242c; /* hairline column/row rules */
+  --paper: #151a21; /* raised surfaces: tables, panels */
+  --figure: #e8eaed; /* primary numerals and text */
+  --muted: #7c8794; /* labels, secondary */
+  --verified: #4ea88a; /* accepted match, control passing */
+  --flag: #c9564b; /* critical exception, unreconciled residual */
+  --caution: #c79a45; /* warn-severity exception */
+  --trace: #5b8def; /* active/highlighted record in a trace */
+
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-sans: "Inter", ui-sans-serif, sans-serif;
+}
+
+@theme {
+  --color-ink: var(--ink);
+  --color-rule: var(--rule);
+  --color-paper: var(--paper);
+  --color-figure: var(--figure);
+  --color-muted: var(--muted);
+  --color-verified: var(--verified);
+  --color-flag: var(--flag);
+  --color-caution: var(--caution);
+  --color-trace: var(--trace);
+
+  --font-mono: var(--font-mono);
+  --font-sans: var(--font-sans);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--ink);
+  color: var(--figure);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Figures: tabular-lining, aligned on the decimal (UI_SPEC.md §1 "Type") */
+.figures {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums lining-nums;
+}

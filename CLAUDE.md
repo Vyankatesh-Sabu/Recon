@@ -43,6 +43,14 @@ treat this file as the non-negotiable "how".
    a strategy pattern (one `LLMClient` protocol, swappable concrete backends)
    specifically so the provider isn't locked in; adding a third provider SDK
    later is expected and doesn't need to come back here to ask.
+   **Approved exception (P6 UI supplement, confirmed with the user
+   2026-08-31):** for the `web/` frontend only (P7-P10) — Vite + React +
+   TypeScript + Tailwind, optionally recharts and framer-motion for one
+   screen. This supersedes the plain-HTML `web/index.html` dashboard shipped
+   in the original P6; `recon/` stays pure Python, no Node in the backend.
+   `web/index.html`/`/dashboard`/`/ask`/`/report` are left in place (not
+   deleted) as of this note — they become throwaway once the new frontend
+   ships, but nothing has removed them yet.
 
 9. **Phase gates in `tests/gates/` are mandatory.** Never start phase N+1
    before phase N's gate script passes. Never weaken a gate to make it pass.
