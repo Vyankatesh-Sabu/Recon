@@ -10,9 +10,11 @@ name had since been retired ("no longer available to new users", 404),
 silently swallowed by adjudicator.py's never-load-bearing catch-all and
 misreported as a schema failure it never was (fixed alongside this: see
 adjudicator.py's `_adjudicate_with_retry`). `converse()` (the Q&A tool-
-calling path) is still unverified against a live reference — it isn't
-exercised by any test or gate here (only MockLLM is), so double-check its
-function-calling shape before relying on it.
+calling path) has since been exercised live too: turn 1 worked, turn 2
+failed with "Function call is missing a thought_signature in functionCall
+parts" — Gemini requires its own function-call parts returned verbatim,
+which `Part.from_function_call()` cannot reproduce. Fixed by carrying the
+raw parts through the conversation history; see `converse` below.
 """
 
 from __future__ import annotations
@@ -70,10 +72,11 @@ class GeminiLLM:
         return self._complete(_EXPLAIN_SYSTEM, evidence)
 
     def converse(self, messages: list[dict], tools: list[dict], system: str) -> dict:
-        """NOTE: best-effort, same caveat as the module docstring — Gemini's
-        function-calling shape (Tool/FunctionDeclaration, Content/Part,
-        function_call/function_response) is reproduced from training
-        knowledge, not verified against a live SDK reference this session."""
+        """Gemini's tool-calling turn. Two things here were found by running
+        it, not by reading about it: FunctionResponse.response must be a
+        dict, and the model's own function-call parts must come back
+        verbatim on the next turn because they carry a thought_signature.
+        Both are commented at the point they matter."""
         from google.genai import types
 
         contents = []
@@ -81,11 +84,26 @@ class GeminiLLM:
             if m["role"] == "user":
                 contents.append(types.Content(role="user", parts=[types.Part.from_text(text=m["content"])]))
             elif m["role"] == "assistant":
-                parts = [
-                    types.Part.from_function_call(name=block["name"], args=block["input"])
-                    for block in m["content"]
-                    if block["type"] == "tool_use"
-                ]
+                # Gemini requires its own function-call parts back verbatim.
+                # Each one carries a `thought_signature` — an opaque, encrypted
+                # handle on the model's reasoning for that call — and rebuilding
+                # the turn with Part.from_function_call() drops it, which the
+                # API rejects on turn 2 with:
+                #   400 INVALID_ARGUMENT ... Function call is missing a
+                #   thought_signature in functionCall parts ...
+                # So the raw parts are carried through qa.py's history (see
+                # `raw_parts` below) and replayed as they arrived. The
+                # from_function_call() path remains for any history that
+                # predates them — a MockLLM turn, or another provider's.
+                raw_parts = m.get("raw_parts")
+                if raw_parts:
+                    parts = [types.Part.model_validate(part) for part in raw_parts]
+                else:
+                    parts = [
+                        types.Part.from_function_call(name=block["name"], args=block["input"])
+                        for block in m["content"]
+                        if block["type"] == "tool_use"
+                    ]
                 contents.append(types.Content(role="model", parts=parts))
             elif m["role"] == "tool_result":
                 c = m["content"]
@@ -123,4 +141,12 @@ class GeminiLLM:
             if getattr(p, "function_call", None)
         ]
         text = "".join(p.text for p in parts if getattr(p, "text", None)) or None
-        return {"stop_reason": "tool_use" if tool_calls else "end_turn", "tool_calls": tool_calls, "text": text}
+        return {
+            "stop_reason": "tool_use" if tool_calls else "end_turn",
+            "tool_calls": tool_calls,
+            "text": text,
+            # The turn exactly as Gemini produced it, thought_signature and
+            # all. Dumped in python mode, never JSON: thought_signature is
+            # `bytes`, and a JSON round-trip would corrupt it.
+            "raw_parts": [p.model_dump(exclude_none=True) for p in parts],
+        }

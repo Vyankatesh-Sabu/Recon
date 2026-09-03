@@ -81,6 +81,11 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     tool_calls: list[dict]
+    # One server-computed line per tool call — what the Q&A console shows
+    # between the question and the answer, so the retrieval is visible
+    # rather than asserted (UI_SPEC §2.8). Defaulted, because /ask
+    # predates it and a caller reading only `answer` must not break.
+    tool_results: list[dict] = []
     record_ids: list[str]
 
 

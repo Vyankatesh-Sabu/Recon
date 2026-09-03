@@ -194,6 +194,9 @@ export interface ClearingEntry {
 export interface AskResponse {
   answer: string
   tool_calls: { name: string; input: Record<string, unknown> }[]
+  /** One server-computed line per tool call, in call order — what the
+   * console renders as the `⟵` line. Paired with tool_calls by index. */
+  tool_results: { name: string; summary: string }[]
   record_ids: string[]
 }
 
