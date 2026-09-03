@@ -89,10 +89,17 @@ class GeminiLLM:
                 contents.append(types.Content(role="model", parts=parts))
             elif m["role"] == "tool_result":
                 c = m["content"]
+                # Found live 2026-09-03: Gemini's FunctionResponse.response
+                # requires a dict — recon/llm/tools.py's list_exceptions()
+                # returns a bare list, and the SDK rejected it outright
+                # (pydantic ValidationError) rather than degrading. Every
+                # tool result gets wrapped the same way regardless of its
+                # actual shape, so this holds for any future tool too.
+                result = c["result"] if isinstance(c["result"], dict) else {"result": c["result"]}
                 contents.append(
                     types.Content(
                         role="user",
-                        parts=[types.Part.from_function_response(name=c["name"], response=c["result"])],
+                        parts=[types.Part.from_function_response(name=c["name"], response=result)],
                     )
                 )
 
