@@ -94,24 +94,47 @@ def _resolve_candidate_rows(entry: dict, candidate_label: str | None) -> list[di
     return entry["evidence"].get(key)
 
 
-def _adjudicate_with_retry(client: LLMClient, payload: dict) -> Adjudication | None:
+def _strip_code_fence(raw: str) -> str:
+    """Despite every provider's system prompt saying "ONLY a JSON object,
+    no other text," a model will still sometimes wrap it in a markdown
+    code fence (found live 2026-09-03: Gemini did this on its very first
+    real adjudication call, producing `Invalid JSON: expected value at
+    line 1 column 1`). Strips a leading/trailing ``` or ```json fence if
+    present; a no-op on already-bare JSON. Applies to every provider —
+    this isn't Gemini-specific behavior, just more likely to surface once
+    something actually calls a real model instead of MockLLM."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").strip()
+        text = text.removesuffix("```").strip()
+    return text
+
+
+def _adjudicate_with_retry(client: LLMClient, payload: dict) -> tuple[Adjudication | None, str | None]:
+    """Returns (adjudication, failure_reason) — failure_reason is None on
+    success, else a short label distinguishing WHY it abstained. Found
+    live (2026-09-03, first real Gemini run): a stale/retired model name
+    404'd on every single call, and the broad except below swallowed it
+    into an indistinguishable "schema failure" — cost real time to
+    diagnose. The retry-then-abstain BEHAVIOR here is unchanged (CLAUDE.md
+    rule 5: the LLM is never load-bearing — no API key, a network error, a
+    rate limit, none of those may crash the pipeline), only the label is
+    now honest about which of "the model's JSON didn't validate" vs "the
+    client itself raised" actually happened.
+    """
+    last_reason = "no_response"
     for _ in range(2):  # one retry on schema violation
         try:
             raw = client.adjudicate(payload)
-            return Adjudication.model_validate_json(raw)
-        except (ValidationError, ValueError):
+        except Exception as exc:
+            last_reason = f"provider_error: {exc}"
             continue
-        except Exception:
-            # CLAUDE.md rule 5: the LLM is never load-bearing. A real
-            # provider backend can raise for reasons that have nothing to
-            # do with the payload — no API key, a network error, a rate
-            # limit — and none of those may be allowed to crash the
-            # reconciliation pipeline. Broad by design: whatever the
-            # client raises, one retry then abstain, exactly like a schema
-            # violation. (Deliberately not logged via `raise` — a provider
-            # SDK's own retry/error semantics are its concern, not ours.)
+        try:
+            return Adjudication.model_validate_json(_strip_code_fence(raw)), None
+        except (ValidationError, ValueError) as exc:
+            last_reason = f"schema_failure: {exc}"
             continue
-    return None  # treated as abstention
+    return None, last_reason  # treated as abstention
 
 
 def run_tier4(
@@ -136,12 +159,12 @@ def run_tier4(
 
         payload = _build_payload(entry, bank_line_row)
         stats.calls += 1
-        adjudication = _adjudicate_with_retry(client, payload)
+        adjudication, failure_reason = _adjudicate_with_retry(client, payload)
         stats.call_log.append(
             {
                 "line_id": line_id,
                 "payload": payload,
-                "decision": adjudication.decision if adjudication else "abstained_schema_failure",
+                "decision": adjudication.decision if adjudication else f"abstained ({failure_reason})",
             }
         )
 
@@ -232,7 +255,7 @@ def _narrate_with_retry(client: LLMClient, evidence: dict) -> ExceptionNarrative
     for _ in range(2):  # one retry on schema violation
         try:
             raw = client.explain(evidence)
-            return ExceptionNarrative.model_validate_json(raw)
+            return ExceptionNarrative.model_validate_json(_strip_code_fence(raw))
         except (ValidationError, ValueError):
             continue
         except Exception:

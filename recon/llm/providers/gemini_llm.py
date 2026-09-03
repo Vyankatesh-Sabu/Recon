@@ -4,11 +4,15 @@ Reads GEMINI_API_KEY from the environment. Temperature 0. Same contract as
 AnthropicLLM (recon/llm/providers/anthropic_llm.py): return raw text,
 never validate it — adjudicator.py owns parsing/retry/abstention.
 
-NOTE: unlike AnthropicLLM, this file wasn't checked against a live SDK
-reference in this session — double-check `google-genai`'s exact call shape
-(package name, `Client`/`generate_content` signature) against current docs
-before relying on this in production; it isn't exercised by any test or
-gate here (only MockLLM is).
+Verified live 2026-09-03 (first real run with a real GEMINI_API_KEY):
+`adjudicate()`'s call shape works — the original `gemini-2.5-flash` model
+name had since been retired ("no longer available to new users", 404),
+silently swallowed by adjudicator.py's never-load-bearing catch-all and
+misreported as a schema failure it never was (fixed alongside this: see
+adjudicator.py's `_adjudicate_with_retry`). `converse()` (the Q&A tool-
+calling path) is still unverified against a live reference — it isn't
+exercised by any test or gate here (only MockLLM is), so double-check its
+function-calling shape before relying on it.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.6-flash"
 
 _ADJUDICATE_SYSTEM = (
     "You are a reconciliation adjudicator. You are given pre-computed deltas "

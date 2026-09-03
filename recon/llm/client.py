@@ -21,8 +21,11 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-# Every exception code this system raises (hop1/2/3 + verifier) — the closed
-# set `Adjudication.reason_code` may name.
+# Every exception code this system raises (hop1/2/3 + verifier). Reference
+# documentation only — not used as a field type (see Adjudication.reason_code
+# below for why: it isn't actually consulted by any decision logic, so
+# constraining it here only gave real models a way to fail validation on an
+# unused field).
 ExceptionCode = Literal[
     "ORPHAN_ORDER",
     "ORPHAN_PAYMENT",
@@ -52,7 +55,16 @@ class Adjudication(BaseModel):
 
     decision: Literal["match", "no_match", "insufficient_evidence"]
     candidate: str | None = None
-    reason_code: ExceptionCode | None = None
+    # Free string, not the closed ExceptionCode set — found live (2026-09-03,
+    # first real Gemini run): the prompt below literally tells the model
+    # "reason_code": string|null, but this field was constrained to
+    # ExceptionCode, and nothing in adjudicator.py ever reads reason_code
+    # at all. A capable model reasonably filled in a descriptive label
+    # ("MULTIPLE_MATCHING_CANDIDATES") that isn't a business exception
+    # code, failed validation, and burned its one retry — pure friction
+    # for an unused, decorative field. Loosened to match the prompt's own
+    # documented contract.
+    reason_code: str | None = None
     explanation: str  # ≤ 2 sentences, plain language
     confidence: float  # 0..1
 
