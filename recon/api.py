@@ -206,13 +206,16 @@ def _hop2_reconstruction(conn: sqlite3.Connection, run_id: str, line_id: str) ->
     )
 
     rows = []
-    for payment_id, kind, method, amount_p, fee_p, gst_p in conn.execute(
-        "SELECT g.payment_id, g.kind, g.method, g.amount_p, g.fee_p, g.gst_p "
+    running_p = 0
+    for payment_id, kind, method, amount_p, fee_p, gst_p, settlement_id, utr in conn.execute(
+        "SELECT g.payment_id, g.kind, g.method, g.amount_p, g.fee_p, g.gst_p, g.settlement_id, g.utr "
         "FROM match_link m JOIN gw_payments g ON g.payment_id = m.id_a "
         "WHERE m.run_id = ? AND m.hop = 2 AND m.id_b = ? AND m.status IN ('accepted', 'proposed') "
         "ORDER BY m.link_id",
         (run_id, line_id),
     ):
+        net_p = hop2._contribution_p(kind, amount_p, fee_p, gst_p)
+        running_p += net_p
         rows.append(
             {
                 "payment_id": payment_id,
@@ -221,11 +224,20 @@ def _hop2_reconstruction(conn: sqlite3.Connection, run_id: str, line_id: str) ->
                 "amount_p": amount_p,
                 "fee_p": fee_p,
                 "gst_p": gst_p,
-                "net_p": hop2._contribution_p(kind, amount_p, fee_p, gst_p),
+                "net_p": net_p,
+                # The running total after this row, so the viewer can count
+                # up as rows stream in without adding anything itself.
+                "subtotal_p": running_p,
+                # What reference this row carried, if any. A tier-2
+                # reconstruction exists precisely because these are null —
+                # the viewer says "no UTR recovered · no settlement id"
+                # off these values rather than asserting it blind.
+                "settlement_id": settlement_id,
+                "utr": utr,
             }
         )
 
-    reconstructed_p = sum(r["net_p"] for r in rows)
+    reconstructed_p = running_p
     credit_p = bank_line["credit_p"] if bank_line else 0
     return {
         "bank_line": bank_line,

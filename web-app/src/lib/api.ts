@@ -154,6 +154,12 @@ export interface ReconstructionRow {
   fee_p: number
   gst_p: number
   net_p: number
+  /** The running total through this row, computed server-side so the
+   * viewer can count up as rows stream in without summing anything. */
+  subtotal_p: number
+  /** Null on a tier-2 reconstruction — that is why it needed one. */
+  settlement_id: string | null
+  utr: string | null
 }
 
 export interface ClearingControl {

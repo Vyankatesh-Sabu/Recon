@@ -25,15 +25,20 @@ function Cell({ id, tier, done }: { id?: string; tier?: number | null; done?: bo
   )
 }
 
-function RowView({ row }: { row: ChainRow }) {
+function RowView({ row, onOpenReconstruction }: { row: ChainRow; onOpenReconstruction?: (linkId: string) => void }) {
   const complete = isFullyChained(row)
+  // Only a tier-2 row has a reconstruction worth opening: tier 1 matched on
+  // a shared UTR, and there is no arithmetic to show for that.
+  const openable = row.tier2 === 2 && row.link2Id ? row.link2Id : null
   return (
     <motion.div
       layout
       initial={{ opacity: 0, x: -10 }}
       animate={{ opacity: 1, x: 0, backgroundColor: complete ? "rgba(78,168,138,0.08)" : "rgba(0,0,0,0)" }}
       transition={{ duration: 0.25 }}
-      className="grid grid-cols-4"
+      className={`grid grid-cols-4 ${openable ? "cursor-pointer hover:bg-ink/40" : ""}`}
+      onClick={openable ? () => onOpenReconstruction?.(openable) : undefined}
+      title={openable ? "Show how this settlement was reconstructed" : undefined}
     >
       <Cell id={row.orderId} />
       <Cell id={row.gwId} tier={row.tier1} />
@@ -71,7 +76,15 @@ function GutterChip({ exc }: { exc: ExceptionEvent }) {
  * bottom. The row/gutter derivation itself lives in lib/runChains.ts —
  * this component only renders what that reducer already computed.
  */
-export function RunCanvas({ rows, gutter }: { rows: ChainRow[]; gutter: ExceptionEvent[] }) {
+export function RunCanvas({
+  rows,
+  gutter,
+  onOpenReconstruction,
+}: {
+  rows: ChainRow[]
+  gutter: ExceptionEvent[]
+  onOpenReconstruction?: (linkId: string) => void
+}) {
   return (
     <div className="bg-paper border border-rule rounded-sm overflow-hidden">
       <div className="grid grid-cols-4 border-b border-rule">
@@ -84,7 +97,7 @@ export function RunCanvas({ rows, gutter }: { rows: ChainRow[]; gutter: Exceptio
       <div className="max-h-[26rem] overflow-y-auto divide-y divide-rule/60">
         <AnimatePresence initial={false}>
           {rows.map((row) => (
-            <RowView key={row.key} row={row} />
+            <RowView key={row.key} row={row} onOpenReconstruction={onOpenReconstruction} />
           ))}
         </AnimatePresence>
         {rows.length === 0 && <div className="px-3 py-8 text-center text-muted text-sm">No records yet.</div>}

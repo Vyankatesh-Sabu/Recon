@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { MetricsBand } from "../components/MetricsBand"
+import { ReconstructionViewer } from "../components/ReconstructionViewer"
 import { RunCanvas } from "../components/RunCanvas"
 import { applyMatchEvent, initialChainState, type ChainState } from "../lib/runChains"
 import { getRunMetrics, startRun, streamRun, type PipelineMetrics, type RunEvent } from "../lib/api"
@@ -33,6 +34,8 @@ export function RunConsole() {
   const [recordsSeen, setRecordsSeen] = useState(0)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [metrics, setMetrics] = useState<PipelineMetrics | null>(null)
+  // The tier-2 row whose reconstruction is open (UI_SPEC §2.3), if any.
+  const [openLinkId, setOpenLinkId] = useState<string | null>(null)
 
   const seenIds = useRef<Set<string>>(new Set())
   const startedAt = useRef<number>(0)
@@ -74,6 +77,7 @@ export function RunConsole() {
     setRejected(0)
     setRecordsSeen(0)
     setMetrics(null)
+    setOpenLinkId(null)
     seenIds.current = new Set()
     startedAt.current = Date.now()
     setElapsedMs(0)
@@ -140,7 +144,9 @@ export function RunConsole() {
         </div>
       </div>
 
-      <RunCanvas rows={chain.rows} gutter={gutter} />
+      <RunCanvas rows={chain.rows} gutter={gutter} onOpenReconstruction={setOpenLinkId} />
+
+      {openLinkId && <ReconstructionViewer linkId={openLinkId} onClose={() => setOpenLinkId(null)} />}
 
       {metrics && <MetricsBand metrics={metrics} />}
     </div>

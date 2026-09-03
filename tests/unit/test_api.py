@@ -439,6 +439,19 @@ def test_match_endpoint_returns_the_full_hop2_reconstruction(tmp_path: Path):
         assert sum(r["net_p"] for r in rows) == body["reconstructed_p"]
         assert body["reconstructed_p"] == body["bank_line"]["credit_p"]
         assert body["delta_p"] == 0
+
+        # The running subtotal is the server's, so the viewer can count up
+        # as rows stream in without adding anything itself (UI_SPEC §0).
+        running = 0
+        for r in rows:
+            running += r["net_p"]
+            assert r["subtotal_p"] == running
+        assert rows[-1]["subtotal_p"] == body["reconstructed_p"]
+
+        # This batch needed reconstructing precisely because no row carried
+        # a reference — what the viewer's "no UTR recovered · no settlement
+        # id" line is asserted from, rather than hardcoded.
+        assert all(r["utr"] is None and r["settlement_id"] is None for r in rows)
     finally:
         app.dependency_overrides.clear()
 

@@ -16,6 +16,10 @@ export interface ChainRow {
   tier1?: number | null
   tier2?: number | null
   hop3Done?: boolean
+  /** The hop-2 match_link this row settled through — what the
+   * reconstruction viewer (UI_SPEC §2.3) is opened with when a T2 row is
+   * clicked in the run console. */
+  link2Id?: string
 }
 
 export interface ChainState {
@@ -35,7 +39,7 @@ export function initialChainState(): ChainState {
  * in-place mutation would apply the same event twice to shared Map/array
  * references and silently double up rows. */
 export function applyMatchEvent(state: ChainState, event: Extract<RunEvent, { kind: "match" }>): ChainState {
-  const { hop, id_a, id_b, tier } = event
+  const { hop, id_a, id_b, tier, link_id } = event
   const rows = [...state.rows]
   const rowByGw = new Map(state.rowByGw)
   const rowsByBank = new Map(state.rowsByBank)
@@ -50,13 +54,13 @@ export function applyMatchEvent(state: ChainState, event: Extract<RunEvent, { ki
     const existing = rowByGw.get(id_a)
     let rowIndex: number
     if (existing !== undefined) {
-      rows[existing] = { ...rows[existing], bankId: id_b, tier2: tier }
+      rows[existing] = { ...rows[existing], bankId: id_b, tier2: tier, link2Id: link_id }
       rowIndex = existing
     } else {
       // No hop1 origin (refund/chargeback/adjustment) — starts its own
       // row at the Gateway column.
       rowIndex = rows.length
-      rows.push({ key: `row-${rowIndex}`, gwId: id_a, bankId: id_b, tier2: tier })
+      rows.push({ key: `row-${rowIndex}`, gwId: id_a, bankId: id_b, tier2: tier, link2Id: link_id })
     }
     rowsByBank.set(id_b, [...(rowsByBank.get(id_b) ?? []), rowIndex])
     return { rows, rowByGw, rowsByBank }
