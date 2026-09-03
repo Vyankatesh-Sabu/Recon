@@ -24,16 +24,32 @@ Tier 4 runs only on hop2's residue: bank lines that hop2 couldn't resolve
 at tier 1 or tier 2 (both "Multiple" -> AMBIGUOUS_SETTLEMENT and
 "NoSolution" -> UNEXPLAINED_BANK_CREDIT — "abstaining is a correct and
 rewarded outcome" is exactly the expected answer for the former).
+
+Candidates for an unexplained credit come from every UNCLAIMED tier-2-
+eligible gateway row, not from hop2's ±3-business-day pool. That pool is
+empty for exactly the lines that reach here — being empty is *why* the
+line is unexplained — so until this changed, a "match" decision on an
+unexplained credit resolved to no rows and quietly became an abstention,
+and no tier-4 proposal could reach the verifier at all. "The verifier
+catches the model" was therefore untestable rather than false. It is now
+demonstrated by tests/unit/test_adjudicator.py and by
+demo/llm_wrong_match.py, both of which run a confidently wrong model
+through the real pipeline and watch V1 throw its one proposal out.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import date
 
 from pydantic import ValidationError
 
+import config
+from recon import busdays
+from recon.engine import hop2
 from recon.llm.client import Adjudication, ExceptionNarrative, LLMClient
 
 MAX_CANDIDATES = 5
@@ -51,43 +67,153 @@ class Tier4Stats:
     call_log: list[dict] = field(default_factory=list)
 
 
-def _build_payload(entry: dict, bank_line_row: tuple) -> dict:
+_TOKEN_RE = re.compile(r"[A-Z0-9]+")
+
+
+def _tokens(text: str | None) -> set[str]:
+    """Uppercase alphanumeric tokens, the same way for a bank narration and
+    for a gateway row's identifiers — so an overlap between them means the
+    narration really does name that row."""
+    return set(_TOKEN_RE.findall((text or "").upper()))
+
+
+def _row_signals(
+    conn: sqlite3.Connection, payment_ids: list[str], value_date: str, narration: str
+) -> tuple[int, list[str]]:
+    """The two per-candidate fields the model is shown besides the money:
+    how far the capture sits from the bank line's value date, and which
+    narration tokens actually name one of these rows.
+
+    Both were hardcoded (`0` / `[]`) until now, which is worse than
+    omitting them: a model reading "date_gap_bdays: 0, narration_tokens_
+    matched: []" was being told, falsely, that every candidate sat exactly
+    on the value date and that the narration named none of them. For a
+    multi-row candidate the gap reported is the largest in the subset (the
+    worst case, not a flattering average) and the tokens are the union.
+    """
+    if not payment_ids:
+        return 0, []
+    placeholders = ",".join("?" * len(payment_ids))
+    rows = conn.execute(
+        f"SELECT payment_id, order_id, settlement_id, utr, captured_on FROM gw_payments "
+        f"WHERE payment_id IN ({placeholders})",
+        payment_ids,
+    ).fetchall()
+    if not rows:
+        return 0, []
+
+    target = date.fromisoformat(value_date)
+    narration_tokens = _tokens(narration)
+    gaps = []
+    matched: set[str] = set()
+    for payment_id, order_id, settlement_id, utr, captured_on in rows:
+        gaps.append(busdays.bday_diff(date.fromisoformat(captured_on), target))
+        row_tokens = set()
+        for value in (payment_id, order_id, settlement_id, utr):
+            row_tokens |= _tokens(value)
+        matched |= narration_tokens & row_tokens
+    return max(gaps, key=abs), sorted(matched)
+
+
+def _unclaimed_tier2_rows(conn: sqlite3.Connection, run_id: str) -> list[tuple[str, int, str]]:
+    """Gateway rows that could still belong to some settlement: no usable
+    UTR, already due to have settled by DATE_TO, and not already claimed by
+    an accepted hop-2 link in this run.
+
+    This is deliberately NOT hop2's ±3-business-day pool. That pool was
+    empty for an unexplained credit — being empty is *why* the line is
+    unexplained — so building tier 4's candidates from it offered the model
+    nothing to choose between and made a "match" decision unresolvable by
+    construction. Widening to every unclaimed row is what gives the model a
+    real, wrong choice available to it, and therefore gives the verifier
+    something real to catch.
+    """
+    cutoff = config.DATE_TO
+    rows = []
+    for payment_id, kind, amount_p, fee_p, gst_p, captured_on in conn.execute(
+        "SELECT payment_id, kind, amount_p, fee_p, gst_p, captured_on FROM gw_payments "
+        "WHERE utr IS NULL AND payment_id NOT IN ("
+        "  SELECT id_a FROM match_link WHERE run_id = ? AND hop = 2 AND status = 'accepted'"
+        ") ORDER BY payment_id",
+        (run_id,),
+    ):
+        captured = date.fromisoformat(captured_on)
+        if busdays.add_bdays(captured, config.SETTLEMENT_LAG_BDAYS) > cutoff:
+            continue  # still legitimately in transit — not a candidate for a past credit
+        rows.append((payment_id, hop2._contribution_p(kind, amount_p, fee_p, gst_p), captured_on))
+    return rows
+
+
+def _build_payload(conn: sqlite3.Connection, run_id: str, entry: dict, bank_line_row: tuple) -> dict:
     line_id, value_date, narration, credit_p = bank_line_row
     evidence = entry["evidence"]
     candidates: list[dict] = []
+    # label -> the gateway rows that label stands for, so a "match" decision
+    # can be resolved back to actual rows to propose.
+    candidate_rows: dict[str, list[dict]] = {}
 
     if entry["outcome"] == "tier2_ambiguous":
         for label, key in (("candidate_a", "subset_a"), ("candidate_b", "subset_b")):
             subset = evidence[key]
             net_p = sum(row["net_p"] for row in subset)
+            gap, tokens = _row_signals(conn, [row["id"] for row in subset], value_date, narration)
             candidates.append(
                 {
                     "batch": label,
                     "rows": len(subset),
                     "net_p": net_p,
                     "delta_p": net_p - credit_p,
-                    "date_gap_bdays": 0,
-                    "narration_tokens_matched": [],
+                    "date_gap_bdays": gap,
+                    "narration_tokens_matched": tokens,
                 }
             )
+            candidate_rows[label] = subset
         failed_checks = ["multiple disjoint subsets sum to the target within tolerance"]
     else:  # tier2_unexplained_credit
+        for payment_id, net_p, _captured_on in _unclaimed_tier2_rows(conn, run_id):
+            label = f"row:{payment_id}"
+            gap, tokens = _row_signals(conn, [payment_id], value_date, narration)
+            candidates.append(
+                {
+                    "batch": label,
+                    "rows": 1,
+                    "net_p": net_p,
+                    "delta_p": net_p - credit_p,
+                    "date_gap_bdays": gap,
+                    "narration_tokens_matched": tokens,
+                }
+            )
+            candidate_rows[label] = [{"id": payment_id, "net_p": net_p}]
+        # Nearest by absolute delta first: if any candidate could honestly
+        # explain this credit, it is in this list.
+        candidates.sort(key=lambda c: (abs(c["delta_p"]), c["batch"]))
         failed_checks = ["no subset within tolerance"]
         if evidence.get("reason") == "over_cap":
             failed_checks.append("candidate pool exceeded max_items")
 
+    candidates = candidates[:MAX_CANDIDATES]
+    entry["candidate_rows"] = {c["batch"]: candidate_rows[c["batch"]] for c in candidates}
+
     return {
         "task": "hop2_unresolved_bank_credit",
         "item": {"line_id": line_id, "value_date": value_date, "credit_p": credit_p, "narration": narration},
-        "candidates": candidates[:MAX_CANDIDATES],
+        "candidates": candidates,
         "failed_checks": failed_checks,
         "instruction": "Choose a candidate only if evidence is decisive. Abstaining is a correct and rewarded outcome.",
     }
 
 
 def _resolve_candidate_rows(entry: dict, candidate_label: str | None) -> list[dict] | None:
+    """Map the label the model picked back to the gateway rows it stands
+    for. `candidate_a`/`candidate_b` name subsets from the ambiguous
+    branch; `row:<payment_id>` names a single unclaimed row."""
     if candidate_label is None:
         return None
+    rows = entry.get("candidate_rows", {}).get(candidate_label)
+    if rows is not None:
+        return rows
+    # Ambiguous-case fallback, kept so a payload built before this entry
+    # was populated still resolves the same way it always did.
     key = _CANDIDATE_KEY_BY_LABEL.get(candidate_label)
     if key is None:
         return None
@@ -157,7 +283,7 @@ def run_tier4(
         if bank_line_row is None:
             continue
 
-        payload = _build_payload(entry, bank_line_row)
+        payload = _build_payload(conn, run_id, entry, bank_line_row)
         stats.calls += 1
         adjudication, failure_reason = _adjudicate_with_retry(client, payload)
         stats.call_log.append(
