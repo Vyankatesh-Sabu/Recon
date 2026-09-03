@@ -1,39 +1,86 @@
-import { useState } from "react"
-import { LedgerPanel } from "../components/LedgerPanel"
-import { LedgerTable, type LedgerColumn } from "../components/LedgerTable"
-import { Money } from "../components/Money"
-import { SeverityRule } from "../components/SeverityRule"
-import { TierBadge } from "../components/TierBadge"
-import { getRunMetrics, startRun, streamRun, type RunEvent, type RunMetrics } from "../lib/api"
+import { useEffect, useRef, useState } from "react"
+import { MetricsBand } from "../components/MetricsBand"
+import { RunCanvas } from "../components/RunCanvas"
+import { applyMatchEvent, initialChainState, type ChainState } from "../lib/runChains"
+import { getRunMetrics, startRun, streamRun, type PipelineMetrics, type RunEvent } from "../lib/api"
+
+type ExceptionEvent = Extract<RunEvent, { kind: "exception" }>
+type Status = "idle" | "running" | "done" | "error"
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  const m = Math.floor(totalSeconds / 60)
+  const s = totalSeconds % 60
+  return `${m}:${String(s).padStart(2, "0")}`
+}
 
 /**
- * P7 shell stub for UI_SPEC.md §2.1 (the hero screen) — real POST /api/run
- * + real SSE stream, rendered as a plain ledger-ruled event log rather than
- * the full record-flow choreography. That visual build is P8's job; this
- * proves the wiring (trigger a run, watch it stream, land on real metrics)
- * end to end with the LLM off.
+ * UI_SPEC.md §2.1 (the hero) + §2.2 (metrics band). Real POST /api/run +
+ * real SSE stream (recon/engine/events.py) drive everything on screen —
+ * no fixture ever stands in for a record here (§0's hard boundary). On
+ * completion the metrics band slides up beneath, fetched from GET
+ * /api/run/{id}/metrics — the same numbers `recon.cli report` prints.
  */
 export function RunConsole() {
   const [runId, setRunId] = useState<string | null>(null)
-  const [events, setEvents] = useState<RunEvent[]>([])
-  const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle")
-  const [metrics, setMetrics] = useState<RunMetrics | null>(null)
+  const [status, setStatus] = useState<Status>("idle")
   const [error, setError] = useState<string | null>(null)
+  const [chain, setChain] = useState<ChainState>(initialChainState())
+  const [gutter, setGutter] = useState<ExceptionEvent[]>([])
+  const [hopCounts, setHopCounts] = useState<Record<1 | 2 | 3, number>>({ 1: 0, 2: 0, 3: 0 })
+  const [llmCalls, setLlmCalls] = useState(0)
+  const [recordsSeen, setRecordsSeen] = useState(0)
+  const [elapsedMs, setElapsedMs] = useState(0)
+  const [metrics, setMetrics] = useState<PipelineMetrics | null>(null)
+
+  const seenIds = useRef<Set<string>>(new Set())
+  const startedAt = useRef<number>(0)
+  const stopStream = useRef<(() => void) | null>(null)
+
+  useEffect(() => {
+    if (status !== "running") return
+    const interval = setInterval(() => setElapsedMs(Date.now() - startedAt.current), 100)
+    return () => clearInterval(interval)
+  }, [status])
+
+  function handleEvent(event: RunEvent) {
+    if (event.kind === "exception") {
+      setGutter((prev) => [...prev, event])
+      for (const r of event.records) seenIds.current.add(r.id)
+    } else {
+      setChain((prev) => applyMatchEvent(prev, event))
+      seenIds.current.add(event.id_a)
+      seenIds.current.add(event.id_b)
+      setHopCounts((prev) => ({ ...prev, [event.hop]: prev[event.hop as 1 | 2 | 3] + 1 }))
+      if (event.tier === 4) setLlmCalls((n) => n + 1)
+    }
+    setRecordsSeen(seenIds.current.size)
+  }
 
   async function handleStart() {
     setStatus("running")
-    setEvents([])
-    setMetrics(null)
     setError(null)
+    setChain(initialChainState())
+    setGutter([])
+    setHopCounts({ 1: 0, 2: 0, 3: 0 })
+    setLlmCalls(0)
+    setRecordsSeen(0)
+    setMetrics(null)
+    seenIds.current = new Set()
+    startedAt.current = Date.now()
+    setElapsedMs(0)
+
     try {
       const { run_id } = await startRun({ llmMode: "off" })
       setRunId(run_id)
-      streamRun(
+      stopStream.current = streamRun(
         run_id,
-        (event) => setEvents((prev) => [...prev, event]),
+        handleEvent,
         () => {
           setStatus("done")
-          getRunMetrics(run_id).then(setMetrics).catch((e) => setError(String(e)))
+          getRunMetrics(run_id)
+            .then((r) => setMetrics(r.metrics))
+            .catch((e) => setError(String(e)))
         },
       )
     } catch (e) {
@@ -42,33 +89,7 @@ export function RunConsole() {
     }
   }
 
-  const columns: LedgerColumn<RunEvent>[] = [
-    { header: "SEQ", figures: true, render: (e) => e.seq },
-    {
-      header: "KIND",
-      render: (e) =>
-        e.kind === "match" ? <TierBadge tier={e.tier} /> : <span className="text-caution text-xs">EXC</span>,
-    },
-    { header: "HOP", figures: true, render: (e) => e.hop },
-    {
-      header: "DETAIL",
-      render: (e) =>
-        e.kind === "match" ? (
-          <span className="figures text-xs text-muted">
-            {e.id_a} <span className="text-verified">↔</span> {e.id_b}
-          </span>
-        ) : (
-          <SeverityRule severity={e.severity}>
-            <span className="text-xs">{e.code}</span>
-          </SeverityRule>
-        ),
-    },
-    {
-      header: "₹ AT RISK",
-      align: "right",
-      render: (e) => (e.kind === "exception" ? <Money amountP={e.amount_at_risk_p} tone="caution" /> : null),
-    },
-  ]
+  useEffect(() => () => stopStream.current?.(), [])
 
   return (
     <div className="flex flex-col gap-6">
@@ -86,17 +107,30 @@ export function RunConsole() {
       {runId && <p className="text-xs text-muted figures">{runId}</p>}
       {error && <p className="text-sm text-flag">{error}</p>}
 
-      <LedgerPanel title={`Event stream (${events.length})`}>
-        <LedgerTable columns={columns} rows={events} rowKey={(e) => String(e.seq)} />
-      </LedgerPanel>
+      <div className="flex gap-8 text-sm border-y border-rule py-3">
+        <div>
+          <span className="text-muted text-xs">records processed </span>
+          <span className="figures tabular-nums">{recordsSeen}</span>
+        </div>
+        <div>
+          <span className="text-muted text-xs">hop rates </span>
+          <span className="figures tabular-nums">
+            H1 {hopCounts[1]} · H2 {hopCounts[2]} · H3 {hopCounts[3]}
+          </span>
+        </div>
+        <div>
+          <span className="text-muted text-xs">elapsed </span>
+          <span className="figures tabular-nums">{formatElapsed(elapsedMs)}</span>
+        </div>
+        <div>
+          <span className="text-muted text-xs">LLM calls </span>
+          <span className="figures tabular-nums">{llmCalls}</span>
+        </div>
+      </div>
 
-      {metrics?.metrics && (
-        <LedgerPanel title="Metrics (§2.2 lands in P8)">
-          <pre className="figures text-xs text-muted whitespace-pre-wrap">
-            {JSON.stringify(metrics.metrics, null, 2)}
-          </pre>
-        </LedgerPanel>
-      )}
+      <RunCanvas rows={chain.rows} gutter={gutter} />
+
+      {metrics && <MetricsBand metrics={metrics} />}
     </div>
   )
 }

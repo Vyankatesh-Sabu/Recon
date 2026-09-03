@@ -25,6 +25,27 @@ export interface ExceptionRecord {
   evidence: unknown | null
 }
 
+/** The pipeline's own scored metrics dict (recon/scoring/scorer.py's
+ * return value) — everything UI_SPEC.md §2.2's metrics band renders. */
+export interface PipelineMetrics {
+  link_precision: number
+  link_recall: number
+  false_match_rate: number
+  full_chain_rate: number
+  full_chain_fraction: { fully_chained: number; chainable_orders: number }
+  exc_detection: number
+  exc_code_accuracy: number
+  tier_histogram: Record<string, number>
+  hop_match: Record<string, string> // "h1": "57/57"
+  llm_calls: { total: number; accepted: number; rejected: number; abstained: number }
+  records_processed: number
+  exceptions: { open: number; critical: number; warn: number; info: number }
+  amount_at_risk_p: number
+  value_reconciled_p: number
+  runtime_s: number
+  residual_p?: number
+}
+
 export interface RunMetrics {
   run_id: string
   seed: number
@@ -32,7 +53,7 @@ export interface RunMetrics {
   started_at: string
   finished_at: string | null
   status: "finished" | "running"
-  metrics: Record<string, unknown> | null
+  metrics: PipelineMetrics | null
 }
 
 export interface MatchLink {

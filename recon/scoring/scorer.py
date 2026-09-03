@@ -59,9 +59,8 @@ def score(conn: sqlite3.Connection, run_id: str, ground_truth_path: Path | str) 
         and payment_id in hop2_accepted_payments
         and truth_payment_to_line.get(payment_id) in hop3_accepted_lines
     )
-    full_chain_rate = (
-        fully_chained / len(truth_order_to_payment) if truth_order_to_payment else 1.0
-    )
+    chainable_orders = len(truth_order_to_payment)
+    full_chain_rate = fully_chained / chainable_orders if chainable_orders else 1.0
 
     # exception detection / code accuracy
     actual_exceptions = conn.execute(
@@ -132,6 +131,10 @@ def score(conn: sqlite3.Connection, run_id: str, ground_truth_path: Path | str) 
         "link_recall": link_recall,
         "false_match_rate": false_match_rate,
         "full_chain_rate": full_chain_rate,
+        # UI_SPEC.md §2.2's metrics band renders "51 / 56" literally, above
+        # the "91.1%" rate — the raw integers, not something the frontend
+        # derives from the rate itself (§0's hard boundary).
+        "full_chain_fraction": {"fully_chained": fully_chained, "chainable_orders": chainable_orders},
         "exc_detection": exc_detection,
         "exc_code_accuracy": exc_code_accuracy,
         "tier_histogram": tier_histogram,
