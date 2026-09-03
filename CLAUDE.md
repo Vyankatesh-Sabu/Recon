@@ -37,8 +37,11 @@ treat this file as the non-negotiable "how".
    code path — not a hop engine, not the LLM adjudicator, not a script — may
    flip that status.
 
-8. **Stack: Python 3.12, stdlib + pydantic v2 + typer + pytest + fastapi.**
-   Nothing else without asking first. **Approved exception (P4):** `anthropic`
+8. **Stack: Python 3.12, stdlib + pydantic v2 + typer + pytest + fastapi
+   + uvicorn.** Nothing else without asking first. (`uvicorn` was already
+   what `recon.cli serve` imported; declaring it in `requirements.txt`
+   only made an existing runtime dependency of a shipped command honest,
+   so that `make serve` works on a clean clone.) **Approved exception (P4):** `anthropic`
    and `google-genai`, the two LLM provider SDKs — `recon/llm/client.py` uses
    a strategy pattern (one `LLMClient` protocol, swappable concrete backends)
    specifically so the provider isn't locked in; adding a third provider SDK

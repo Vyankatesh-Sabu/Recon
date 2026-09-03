@@ -10,3 +10,10 @@ google-genai==2.20.0
 # live in a gitignored .env instead of being re-exported every shell
 # session (confirmed with the user 2026-08-31).
 python-dotenv==1.2.3
+# `recon.cli serve` needs an ASGI server to actually listen on a port.
+# Until now it was an undeclared import — `make serve` on a clean clone
+# printed an install hint and exited 1, which made the whole frontend
+# (web-app/, which proxies to it) unreachable without a manual pip
+# install. It is a runtime dependency of a shipped command, so it is
+# declared like one.
+uvicorn==0.52.4

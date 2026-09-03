@@ -59,10 +59,20 @@ engine on all three residue cases. Say that. It reads as rigor. "Our agent
 reconciles your books" reads as every other submission.
 
 ### The 56.1% sentence — never separate these
+**Corrected 2026-09-03 against the actual seed-42 run.** The earlier
+version of this sentence said all 25 non-chaining orders were in transit.
+Only 11 are. Saying it the old way on camera would have been a false
+claim about our own output, and it was also the weaker sentence:
+
 > Full chain: 32 of 57 orders go order → capture → settlement → ledger.
-> **The rest haven't settled by the cutoff date** — they're the two
-> in-transit batches (₹1,18,853), tracked with their expected settlement
-> dates, not failures.
+> Of the 25 that don't: **11 haven't settled by the cutoff date** — the two
+> in-transit batches, ₹1,21,059, tracked with their expected settlement
+> dates. **5 are the ambiguous pair we refuse to attribute.** And **9
+> settled into `setl_0803`, whose ledger voucher was deleted** — that's the
+> GL_MISSING exception, ₹79,551, sitting in the queue.
+
+Every one of the 25 is accounted for, and none of them is a wrong match.
+Verify before recording: `.venv/bin/python -m recon.cli report`.
 
 ### What broke, and how we got out (the story judges read first)
 Everything had been measured on one seed. We decided that proved nothing,
@@ -176,7 +186,7 @@ worlds, not one.*
 |---|---|---|---|
 | 1 | 20s | Terminal: `head -40 data/ground_truth.json` | "This is synthetic data — I generated it, so here's exactly what that proves and what it doesn't. The answer key is written *before* the engine runs, so scoring against it means something." |
 | 2 | 30s | Run console, pace 150, LLM off, click Start | "Orders, gateway, bank, ledger. Watch records travel left to right and snap into chains. Green rows are fully chained. Failures drop into the gutter, tinted by severity. It's paced for the camera — the real runtime is in the band." |
-| 3 | 25s | Metrics band | "False-match rate: **zero point zero percent**. Precision 100, recall 99.1. Full chain 32 of 57 — **the rest haven't settled by the cutoff, those are the in-transit batches you'll see in the queue.**" |
+| 3 | 25s | Metrics band | "False-match rate: **zero point zero percent**. Precision 100, recall 99.1. Full chain 32 of 57 — and I can account for all 25 of the rest: **eleven haven't settled by the cutoff, five are the pair we refuse to attribute, and nine settled into a batch whose ledger voucher was deleted.** That last one is in the queue as GL_MISSING." |
 | 4 | 20s | Terminal: `make eval` | "One cherry-picked match proves nothing. So: 344 independently generated worlds, zero false matches on every one of them. Five seconds." |
 | 5 | 45s | Reconstruction viewer on `setl_0812` | "This settlement arrived with no UTR and no settlement ID. Here's how it matched: five gateway rows, fees and GST netted, a refund subtracted — rows stream in — and the delta resolves to zero. Every rupee, on screen." |
 | 6 | 35s | Refusal card | "These two settlements are identical: same date, same amount to the paisa, two valid reconstructions each. The engine refuses. A wrong match is worse than an honest gap." **Pause two seconds.** |

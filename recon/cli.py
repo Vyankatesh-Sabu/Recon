@@ -137,12 +137,14 @@ def serve(
     try:
         import uvicorn
     except ImportError:
+        # uvicorn IS a declared dependency now (requirements.txt, CLAUDE.md
+        # rule 8), so reaching this branch means the environment is stale
+        # rather than that something is missing by design.
         typer.echo(
-            "serve: the app is implemented (recon/api.py: POST /ask) but uvicorn isn't "
-            "installed to run it — `pip install uvicorn` (not yet an approved dependency; "
-            "add it to requirements.txt if you want `serve` to actually listen on a port). "
-            "Meanwhile, tests/gates exercise the same app in-process via FastAPI's TestClient, "
-            "no server needed."
+            "serve: uvicorn is missing from this environment. It is a declared dependency — "
+            "run `make setup` (or `.venv/bin/pip install -r requirements.txt`) and try again. "
+            "The app itself is fine: tests and gates exercise it in-process via FastAPI's "
+            "TestClient, no server needed."
         )
         raise typer.Exit(code=1)
     uvicorn.run("recon.api:app", host=host, port=port)
