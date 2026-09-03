@@ -27,6 +27,11 @@ export interface ExceptionRecord {
    * exists. Null for refusals (AMBIGUOUS_SETTLEMENT,
    * UNEXPLAINED_BANK_CREDIT), which propose no link by design. */
   evidence_link_id: string | null
+  /** That link's hop. Only a hop-2 link carries settlement arithmetic, so
+   * this is what tells the queue whether there is a reconstruction worth
+   * opening — the linked match is related to the exception's records, not
+   * necessarily an explanation of the exception itself. */
+  evidence_link_hop: number | null
 }
 
 /** What hop2 stored on a refusal (recon/engine/hop2.py, migration 003):

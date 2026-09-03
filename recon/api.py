@@ -142,39 +142,47 @@ def _resolve_llm_client(provider: str | None) -> LLMClient:
 
 def _reconstruction_evidence(
     conn: sqlite3.Connection, run_id: str, records: list[dict]
-) -> tuple[dict | None, str | None]:
+) -> tuple[dict | None, str | None, int | None]:
     """Best-effort: a proposed/accepted/rejected match_link touching any of
     this exception's records carries the full reconstruction table in its
-    evidence column. Returns (evidence, link_id) — the link_id is what the
-    exception queue opens the reconstruction viewer with (UI_SPEC §2.4),
-    so it's returned rather than discarded. Exceptions with no match_link
-    at all (a genuine refusal — AMBIGUOUS_SETTLEMENT,
-    UNEXPLAINED_BANK_CREDIT) return (None, None); as of migration 003
-    those carry their own `exceptions.evidence` instead, which callers
-    prefer over this reconstruction."""
+    evidence column. Returns (evidence, link_id, link_hop).
+
+    The link_id is what the exception queue opens the reconstruction
+    viewer with (UI_SPEC §2.4), and the hop is what tells it whether
+    there is a reconstruction to open at all: only a hop-2 link carries
+    settlement arithmetic. The match found here is a link touching one of
+    the exception's records — related to it, but not necessarily an
+    explanation OF it (an UNSETTLED_IN_TRANSIT row, for instance, matches
+    its own payment's hop-1 link), so callers must label it as the linked
+    match's evidence rather than as the exception's own.
+
+    Exceptions with no match_link at all (a genuine refusal —
+    AMBIGUOUS_SETTLEMENT, UNEXPLAINED_BANK_CREDIT) return (None, None,
+    None); as of migration 003 those carry their own
+    `exceptions.evidence` instead, which callers prefer over this."""
     for r in records:
         row = conn.execute(
-            "SELECT link_id, evidence FROM match_link WHERE run_id = ? AND (id_a = ? OR id_b = ?) "
+            "SELECT link_id, hop, evidence FROM match_link WHERE run_id = ? AND (id_a = ? OR id_b = ?) "
             "AND evidence IS NOT NULL LIMIT 1",
             (run_id, r["id"], r["id"]),
         ).fetchone()
-        if row and row[1]:
-            return json.loads(row[1]), row[0]
-    return None, None
+        if row and row[2]:
+            return json.loads(row[2]), row[0], row[1]
+    return None, None, None
 
 
 def _exception_evidence(
     conn: sqlite3.Connection, run_id: str, records: list[dict], stored: str | None
-) -> tuple[dict | None, str | None]:
-    """The evidence an exception row should report, and the match_link id
-    (if any) that can render it as a reconstruction. hop2's refusals store
-    their own evidence on the row (migration 003) and have no link;
-    everything else is reconstructed from whichever link touched its
-    records, exactly as before 003 existed."""
-    link_evidence, link_id = _reconstruction_evidence(conn, run_id, records)
+) -> tuple[dict | None, str | None, int | None]:
+    """The evidence an exception row should report, the match_link id (if
+    any) that can render it as a reconstruction, and that link's hop.
+    hop2's refusals store their own evidence on the row (migration 003)
+    and have no link; everything else is reconstructed from whichever link
+    touched its records, exactly as before 003 existed."""
+    link_evidence, link_id, link_hop = _reconstruction_evidence(conn, run_id, records)
     if stored:
-        return json.loads(stored), link_id
-    return link_evidence, link_id
+        return json.loads(stored), link_id, link_hop
+    return link_evidence, link_id, link_hop
 
 
 def _hop2_reconstruction(conn: sqlite3.Connection, run_id: str, line_id: str) -> dict:
@@ -276,7 +284,9 @@ def get_report(db_path: Path = Depends(get_db_path)) -> dict:
             (run_id,),
         ):
             records = json.loads(records_json)
-            evidence, evidence_link_id = _exception_evidence(conn, run_id, records, stored_evidence)
+            evidence, evidence_link_id, evidence_link_hop = _exception_evidence(
+                conn, run_id, records, stored_evidence
+            )
             exceptions.append(
                 {
                     "exc_id": exc_id,
@@ -288,6 +298,7 @@ def get_report(db_path: Path = Depends(get_db_path)) -> dict:
                     "records": records,
                     "evidence": evidence,
                     "evidence_link_id": evidence_link_id,
+                    "evidence_link_hop": evidence_link_hop,
                 }
             )
 
@@ -479,7 +490,9 @@ def get_run_exceptions(
             stored_evidence,
         ) in conn.execute(query, params):
             records = json.loads(records_json)
-            evidence, evidence_link_id = _exception_evidence(conn, run_id, records, stored_evidence)
+            evidence, evidence_link_id, evidence_link_hop = _exception_evidence(
+                conn, run_id, records, stored_evidence
+            )
             exceptions.append(
                 {
                     "exc_id": exc_id,
@@ -494,6 +507,7 @@ def get_run_exceptions(
                     "status": status,
                     "evidence": evidence,
                     "evidence_link_id": evidence_link_id,
+                    "evidence_link_hop": evidence_link_hop,
                 }
             )
         return {"run_id": run_id, "exceptions": exceptions}
