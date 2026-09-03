@@ -29,6 +29,9 @@ untouched, existing tests keep passing):
     GET  /api/control/clearing        -> V5's residual_p vs exposure_p, their
                                           difference, and the PG_RECEIVABLE
                                           T-account with a running balance.
+    GET  /api/eval?count=N            -> tests/eval_multi_seed.py run
+                                          in-process: the accuracy claim,
+                                          measured live rather than quoted.
     POST /api/ask                     -> same as /ask, plus an optional
                                           run_id to target a specific run
                                           instead of always the latest.
@@ -45,7 +48,9 @@ import asyncio
 import json
 import queue
 import sqlite3
+import sys
 import threading
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -625,6 +630,57 @@ def get_clearing_control(run_id: str | None = None, db_path: Path = Depends(get_
         }
     finally:
         conn.close()
+
+
+@app.get("/api/eval")
+def get_eval(count: int = 100, start: int = 1) -> dict:
+    """Run the multi-seed evaluation in-process and return its summary.
+
+    The same `tests/eval_multi_seed.py` the `make eval` target runs — the
+    accuracy claim is the one number this project most needs to be
+    checkable rather than quoted, so the UI runs it live instead of
+    displaying a figure typed into the frontend.
+
+    Synchronous and slow by web standards (~1 s per 100 seeds), and each
+    seed builds its own temporary database — it never touches
+    `data/recon.db` or the run history. `count` is capped so a stray query
+    string can't turn one request into a very long job.
+    """
+    count = max(1, min(count, 500))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from tests.eval_multi_seed import _run_one_seed
+
+    t0 = time.monotonic()
+    results = [_run_one_seed(seed) for seed in range(start, start + count)]
+    elapsed_s = time.monotonic() - t0
+
+    completed = [r for r in results if r["ok"]]
+    generation_failed = [r for r in results if r["stage"] == "generate"]
+    aborted = [r for r in results if r["stage"] == "pipeline"]
+    nonzero_false_match = [r["seed"] for r in completed if r["false_match_rate"] > 0]
+
+    def spread(key: str) -> dict | None:
+        values = [r[key] for r in completed]
+        if not values:
+            return None
+        return {"min": min(values), "max": max(values), "mean": sum(values) / len(values)}
+
+    return {
+        "start": start,
+        "count": count,
+        "completed": len(completed),
+        "generation_failed": len(generation_failed),
+        "loader_quarantined": len([r for r in results if r["stage"] == "load"]),
+        "pipeline_aborted": len(aborted),
+        "aborted_seeds": [r["seed"] for r in aborted],
+        # The headline: a nonempty list here is the loudest possible finding.
+        "nonzero_false_match_seeds": nonzero_false_match,
+        "false_match_rate": spread("false_match_rate"),
+        "link_precision": spread("link_precision"),
+        "link_recall": spread("link_recall"),
+        "full_chain_rate": spread("full_chain_rate"),
+        "elapsed_s": elapsed_s,
+    }
 
 
 @app.post("/api/ask", response_model=AskResponse)

@@ -324,11 +324,76 @@ export const getRunExceptions = (
 
 export const getMatch = (linkId: string) => getJSON<MatchLink>(`/api/match/${linkId}`)
 
+/** recon/llm/tools.py::trace_order — the same grounded lookup the Q&A
+ * agent uses, with no LLM in the loop. A null hop means "no accepted link
+ * at this hop", which is the broken link the chain explorer draws. */
+export interface OrderChain {
+  order: {
+    order_id: string
+    customer: string
+    amount_p: number
+    method: string
+    status: string
+    created_on: string
+  }
+  capture: {
+    payment_id: string
+    kind: string
+    amount_p: number
+    fee_p: number
+    gst_p: number
+    method: string
+    captured_on: string
+    settlement_id: string | null
+    utr: string | null
+  } | null
+  settlement: { batch: string | null; utr: string | null; bank_line: string | null }
+  gl: { vouchers: string[] }
+  hops: { h1: string | null; h2: string | null; h3: string | null }
+  exceptions: {
+    exc_id: string
+    code: string
+    severity: string
+    amount_at_risk_p: number
+    explanation: string
+    suggested_action: string
+    status: string
+  }[]
+}
+
 export const getOrderChain = (orderId: string, runId?: string) =>
-  getJSON<Record<string, unknown>>(`/api/order/${orderId}/chain${runId ? `?run_id=${runId}` : ""}`)
+  getJSON<OrderChain>(`/api/order/${orderId}/chain${runId ? `?run_id=${runId}` : ""}`)
 
 export const getClearingControl = (runId?: string) =>
   getJSON<ClearingControl>(`/api/control/clearing${runId ? `?run_id=${runId}` : ""}`)
+
+/** GET /api/eval — tests/eval_multi_seed.py run in-process. The accuracy
+ * claim measured live, rather than a number typed into the frontend. */
+export interface EvalSummary {
+  start: number
+  count: number
+  completed: number
+  generation_failed: number
+  loader_quarantined: number
+  pipeline_aborted: number
+  aborted_seeds: number[]
+  /** Nonempty here is the loudest possible finding. */
+  nonzero_false_match_seeds: number[]
+  false_match_rate: Spread | null
+  link_precision: Spread | null
+  link_recall: Spread | null
+  full_chain_rate: Spread | null
+  elapsed_s: number
+}
+
+export interface Spread {
+  min: number
+  max: number
+  mean: number
+}
+
+export const runEval = (count = 100, start = 1) =>
+  getJSON<EvalSummary>(`/api/eval?count=${count}&start=${start}`)
 
 export const askQuestion = (question: string, runId?: string) =>
   postJSON<AskResponse>("/api/ask", { question, run_id: runId })

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { AdjudicationPanel } from "../components/AdjudicationPanel"
 import { MetricsBand } from "../components/MetricsBand"
 import { ReconstructionViewer } from "../components/ReconstructionViewer"
+import { RobustnessPanel } from "../components/RobustnessPanel"
 import { RunCanvas, type GutterItem } from "../components/RunCanvas"
 import { applyMatchEvent, initialChainState, type ChainState } from "../lib/runChains"
 import { getRunMetrics, startRun, streamRun, type PipelineMetrics, type RunEvent } from "../lib/api"
@@ -226,6 +227,11 @@ export function RunConsole() {
       {metrics?.llm_call_log && metrics.llm_call_log.length > 0 && (
         <AdjudicationPanel calls={metrics.llm_call_log} />
       )}
+
+      {/* One run proves one run. This sits under the metrics band so the
+          answer to "one cherry-picked match proves nothing" is one click
+          from the number it is answering. */}
+      {metrics && <RobustnessPanel />}
     </div>
   )
 }

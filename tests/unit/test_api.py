@@ -562,3 +562,32 @@ def test_verifier_emits_a_rejected_event_the_stream_carries(tmp_path: Path):
     assert rejected["link_id"] == "ML-bogus"
     assert rejected["hop"] == 1
     assert rejected["reason"].startswith("V1_failed")
+
+
+def test_eval_endpoint_runs_the_multi_seed_harness_in_process():
+    """The accuracy claim is measured by the UI, not typed into it — so the
+    endpoint behind the robustness panel has to actually run the harness.
+    Kept to a couple of seeds; `make eval` is the 500-world version."""
+    client = TestClient(app)
+    body = client.get("/api/eval?count=2&start=42").json()
+    assert body["count"] == 2
+    assert body["start"] == 42
+    assert body["nonzero_false_match_seeds"] == []
+    assert body["pipeline_aborted"] == 0
+    assert body["completed"] >= 1, "seed 42 always generates"
+    assert body["false_match_rate"]["max"] == 0.0
+    assert body["link_precision"]["min"] == 1.0
+    # counted, not dropped: every attempted seed lands in exactly one bucket
+    assert (
+        body["completed"]
+        + body["generation_failed"]
+        + body["loader_quarantined"]
+        + body["pipeline_aborted"]
+        == body["count"]
+    )
+
+
+def test_eval_endpoint_caps_count():
+    """A stray query string must not turn one request into a very long job."""
+    body = TestClient(app).get("/api/eval?count=99999&start=1").json()
+    assert body["count"] == 500
