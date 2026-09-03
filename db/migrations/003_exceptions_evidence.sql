@@ -1,0 +1,17 @@
+-- P9: persist a refusal's evidence on the exception itself.
+--
+-- Until now the only place reconstruction evidence survived a run was
+-- `match_link.evidence`, and api.py's _reconstruction_evidence() walked
+-- back from an exception's records to whatever link happened to touch
+-- them. That works for exceptions that HAVE a link (FEE_VARIANCE,
+-- GL_DECOMPOSITION_FAIL) and is structurally impossible for the ones the
+-- UI most needs it for: AMBIGUOUS_SETTLEMENT and UNEXPLAINED_BANK_CREDIT
+-- are refusals — hop2 deliberately proposes no link, so there is nothing
+-- to hang the evidence on and the candidate subsets it computed were
+-- dropped on the floor (kept only in-process on Hop2Stats.evidence_log).
+--
+-- The refusal card (UI_SPEC §2.5) has to show "candidate subsets: 2
+-- (sizes 3, 2)" from real data, so the evidence has to outlive the run.
+-- Additive and nullable: every existing row reads back NULL and falls
+-- through to the old _reconstruction_evidence() path unchanged.
+ALTER TABLE exceptions ADD COLUMN evidence TEXT;

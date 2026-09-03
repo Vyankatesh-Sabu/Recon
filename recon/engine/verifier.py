@@ -279,7 +279,7 @@ def run_verifier(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None
             stats.duplicate_claims += 1
             add_duplicate_claim(hop, [{"src": src_a, "id": id_a}, {"src": src_b, "id": id_b}], link_id)
 
-    def reject_v1(link_id: str, reason: str, tier: int | None = None) -> None:
+    def reject_v1(link_id: str, hop: int, reason: str, tier: int | None = None) -> None:
         # Tier 4 (LLM) proposals get a distinguishing rejection message —
         # SPEC §8/V6: "rejection demotes to the original exception with
         # llm_rejected=true noted." The original exception itself is left
@@ -291,6 +291,20 @@ def run_verifier(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None
             (f"{prefix}: {reason}", link_id),
         )
         stats.rejected += 1
+        if on_event is not None:
+            # The run console's gutter shows rejections next to exceptions
+            # (UI_SPEC §2.1): a proposal the verifier threw out is the
+            # single most load-bearing thing this pipeline does, and until
+            # now it was the only outcome that emitted nothing at all.
+            on_event(
+                {
+                    "kind": "rejected",
+                    "hop": hop,
+                    "link_id": link_id,
+                    "tier": tier,
+                    "reason": f"{prefix}: {reason}",
+                }
+            )
 
     proposed = conn.execute(
         "SELECT link_id, hop, src_a, id_a, src_b, id_b, tier FROM match_link "
@@ -305,7 +319,7 @@ def run_verifier(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None
     for link_id, hop, src_a, id_a, src_b, id_b, tier in hop1_links:
         ok, reason = _verify_hop1(conn, id_a, id_b)
         if not ok:
-            reject_v1(link_id, reason)
+            reject_v1(link_id, hop, reason, tier=tier)
             continue
         accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b, tier)
 
@@ -322,8 +336,8 @@ def run_verifier(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None
         ok, reason = _verify_hop2_batch(conn, id_a_list, id_b)
         tier = links[0][6]
         if not ok:
-            for link_id, *_ in links:
-                reject_v1(link_id, reason, tier=tier)
+            for link_id, link_hop, *_ in links:
+                reject_v1(link_id, link_hop, reason, tier=tier)
             continue
         for link_id, hop, src_a, id_a, src_b, id_b, link_tier in links:
             accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b, link_tier)
@@ -332,7 +346,7 @@ def run_verifier(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None
     for link_id, hop, src_a, id_a, src_b, id_b, tier in hop3_links:
         ok, reason = _verify_hop3(conn, id_a, id_b)
         if not ok:
-            reject_v1(link_id, reason)
+            reject_v1(link_id, hop, reason, tier=tier)
             continue
         accept_or_reject(link_id, hop, src_a, id_a, src_b, id_b, tier)
 

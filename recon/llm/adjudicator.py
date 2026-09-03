@@ -214,14 +214,31 @@ def run_tier4(
 def finalize_tier4_stats(conn: sqlite3.Connection, run_id: str, stats: Tier4Stats) -> None:
     """Call after the verifier's second pass has processed tier-4 proposals —
     fills in accepted/rejected so the report can print
-    "LLM proposed N, verifier accepted A, rejected R, abstained X"."""
-    for _id_b, status in conn.execute(
-        "SELECT id_b, status FROM match_link WHERE run_id = ? AND tier = 4 GROUP BY id_b", (run_id,)
+    "LLM proposed N, verifier accepted A, rejected R, abstained X", and
+    stamps each call in the log with what the verifier did with it.
+
+    The `verifier_outcome`/`verifier_reason` keys are what makes the
+    adjudication panel (UI_SPEC §2.1) honest: "the model said X, the
+    verifier said Y" on the same row, per call. A call the model abstained
+    on produced no proposal, so it has no outcome to report and the keys
+    stay absent — that's the difference between "the verifier let it
+    through" and "there was nothing to check", and the panel renders the
+    second as "—" rather than inventing a verdict."""
+    by_line: dict[str, tuple[str, str | None]] = {}
+    for id_b, status, reason in conn.execute(
+        "SELECT id_b, status, reason FROM match_link WHERE run_id = ? AND tier = 4 GROUP BY id_b", (run_id,)
     ):
+        by_line[id_b] = (status, reason)
         if status == "accepted":
             stats.accepted += 1
         elif status == "rejected":
             stats.rejected += 1
+
+    for call in stats.call_log:
+        outcome = by_line.get(call["line_id"])
+        if outcome is None:
+            continue
+        call["verifier_outcome"], call["verifier_reason"] = outcome
 
 
 def resolve_exceptions_for_accepted_tier4(conn: sqlite3.Connection, run_id: str) -> int:

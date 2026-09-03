@@ -81,7 +81,7 @@ def main() -> int:
             events = drain(client, run_id)
             check(bool(events), f"{run_id}: expected at least one streamed event")
             check(
-                {e["kind"] for e in events} <= {"match", "exception"},
+                {e["kind"] for e in events} <= {"match", "exception", "rejected"},
                 f"{run_id}: unexpected event kind(s) {({e['kind'] for e in events})}",
             )
             check(

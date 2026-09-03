@@ -5,9 +5,10 @@ Writes `match_link` rows with status='proposed' ONLY — never accepted
 fee-variance, tier-2 unique, tier-2 ambiguous) builds a full evidence dict
 (per-row net, subtotal, target, delta). For proposed links it's persisted in
 `match_link.evidence`; the refused/no-link cases (ambiguous, unexplained-
-credit) have nowhere to persist it (no evidence column on `exceptions`, and
-no link should exist to hang it on for an ambiguous case we refuse to pick),
-so `run_hop2` also returns every attempt's evidence on `Hop2Stats.evidence_log`.
+credit) have no link to hang it on — refusing to pick is the whole point —
+so as of migration 003 they persist it on `exceptions.evidence` instead.
+`run_hop2` additionally returns every attempt's evidence on
+`Hop2Stats.evidence_log`, which is what feeds tier 4 in the same process.
 """
 
 from __future__ import annotations
@@ -79,14 +80,30 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
         link_seq += 1
         return f"{run_id}-ML2-{link_seq:04d}"
 
-    def add_exception(code: str, records: list[dict], amount_at_risk_p: int, event_date: date, explanation: str, suggested_action: str) -> None:
+    def add_exception(
+        code: str,
+        records: list[dict],
+        amount_at_risk_p: int,
+        event_date: date,
+        explanation: str,
+        suggested_action: str,
+        evidence: dict | None = None,
+    ) -> None:
+        """`evidence` (P9, migration 003) persists the reconstruction attempt
+        on the exception row itself. It matters most for the refusals —
+        AMBIGUOUS_SETTLEMENT and UNEXPLAINED_BANK_CREDIT propose no
+        match_link by design, so before this column the candidate subsets
+        this hop computed had nowhere to live and the UI could only show
+        the templated prose. Optional: codes that already have a link
+        carrying the same dict (FEE_VARIANCE) leave it None and api.py
+        falls back to _reconstruction_evidence() exactly as before."""
         nonlocal exc_seq
         exc_seq += 1
         exc_id = f"{run_id}-EXC2-{exc_seq:04d}"
         conn.execute(
             "INSERT INTO exceptions "
-            "(exc_id, run_id, code, severity, hop, records, amount_at_risk_p, age_days, explanation, suggested_action, status) "
-            "VALUES (?, ?, ?, ?, 2, ?, ?, ?, ?, ?, 'open')",
+            "(exc_id, run_id, code, severity, hop, records, amount_at_risk_p, age_days, explanation, suggested_action, status, evidence) "
+            "VALUES (?, ?, ?, ?, 2, ?, ?, ?, ?, ?, 'open', ?)",
             (
                 exc_id,
                 run_id,
@@ -97,6 +114,7 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
                 max((config.DATE_TO - event_date).days, 0),
                 explanation,
                 suggested_action,
+                json.dumps(evidence) if evidence is not None else None,
             ),
         )
         stats.exceptions_by_code[code] = stats.exceptions_by_code.get(code, 0) + 1
@@ -324,6 +342,9 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
                 stats.tier2_cross_collision += 1
                 evidence = {
                     "tier": 2,
+                    "bank_line": line_id,
+                    "value_date": value_date.isoformat(),
+                    "narration": narration,
                     "target_p": credit_p,
                     "candidate_pool": pool_evidence,
                     "subset": [{"id": pid, "net_p": v} for pid, v in result.subset],
@@ -340,6 +361,7 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
                     f"bank line(s) {colliding_lines} — a gateway row can't belong to two settlements; "
                     "engine must refuse rather than guess which one it is.",
                     "Confirm settlement ID in gateway dashboard.",
+                    evidence=evidence,
                 )
                 stats.evidence_log.append({"outcome": "tier2_cross_collision", "bank_line": line_id, "evidence": evidence})
                 continue
@@ -364,6 +386,9 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
             subtotal_b = sum(v for _, v in result.subset_b)
             evidence = {
                 "tier": 2,
+                "bank_line": line_id,
+                "value_date": value_date.isoformat(),
+                "narration": narration,
                 "target_p": credit_p,
                 "candidate_pool": pool_evidence,
                 "subset_a": [{"id": pid, "net_p": v} for pid, v in result.subset_a],
@@ -381,12 +406,16 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
                 f"Bank line {line_id} (credit {credit_p}p) reconstructs to at least two disjoint candidate "
                 f"subsets of gateway rows — engine must refuse; selecting either would be a false match.",
                 "Confirm settlement ID in gateway dashboard.",
+                evidence=evidence,
             )
             stats.evidence_log.append({"outcome": "tier2_ambiguous", "bank_line": line_id, "evidence": evidence})
 
         else:  # NoSolution
             evidence = {
                 "tier": 2,
+                "bank_line": line_id,
+                "value_date": value_date.isoformat(),
+                "narration": narration,
                 "target_p": credit_p,
                 "candidate_pool": pool_evidence,
                 "reason": result.reason,
@@ -401,6 +430,7 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
                 f"Bank credit {line_id} ({narration!r}, {credit_p}p) matches no gateway batch, "
                 f"even after subset-sum reconstruction over {len(pool)} nearby candidates.",
                 "Route to invoice queue; confirm source of funds.",
+                evidence=evidence,
             )
             stats.evidence_log.append({"outcome": "tier2_unexplained_credit", "bank_line": line_id, "evidence": evidence})
 

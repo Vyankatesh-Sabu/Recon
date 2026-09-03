@@ -3,11 +3,11 @@ run/streaming/reconstruction API added by the P6 UI supplement (§3).
 
 POST /ask {"question": str} -> {"answer": str, "tool_calls": [...], "record_ids": [...]}.
 GET  /report -> the latest run's metrics + full open-exception list, each
-    with its reconstruction evidence when a match_link happens to carry one
-    (tier1/tier2/hop3 links do; AMBIGUOUS_SETTLEMENT/UNEXPLAINED_BANK_CREDIT
-    never got one in the first place — they're refusals, nothing to attach
-    it to — so `evidence` is null there; the exception's own `explanation`
-    already says why).
+    with its evidence: the refusals (AMBIGUOUS_SETTLEMENT,
+    UNEXPLAINED_BANK_CREDIT) carry their own, persisted on the exception
+    row by hop2 (migration 003) since they deliberately propose no link;
+    everything else is reconstructed from whichever match_link touched its
+    records, and reports that link's id as `evidence_link_id`.
 web/index.html is mounted at /dashboard (plain HTML + fetch, SPEC §10).
 
 P6 supplement §3 API surface (all additive — /ask, /report, /dashboard are
@@ -20,9 +20,15 @@ untouched, existing tests keep passing):
                                           order (recon/engine/events.py).
     GET  /api/run/{id}/metrics        -> that run's `runs` row + metrics.
     GET  /api/run/{id}/exceptions     -> that run's exceptions, filterable.
-    GET  /api/match/{link_id}         -> one match_link row, evidence parsed.
+    GET  /api/run/latest              -> same body as .../metrics, for the
+                                          most recently finished run.
+    GET  /api/match/{link_id}         -> one match_link row, evidence parsed;
+                                          hop-2 links also carry the full
+                                          settlement reconstruction.
     GET  /api/order/{order_id}/chain  -> recon.llm.tools.trace_order, as JSON.
-    GET  /api/control/clearing        -> V5's residual_p vs exposure_p.
+    GET  /api/control/clearing        -> V5's residual_p vs exposure_p, their
+                                          difference, and the PG_RECEIVABLE
+                                          T-account with a running balance.
     POST /api/ask                     -> same as /ask, plus an optional
                                           run_id to target a specific run
                                           instead of always the latest.
@@ -50,7 +56,7 @@ from pydantic import BaseModel
 
 import config
 from recon import db as recon_db
-from recon.engine import pipeline, verifier
+from recon.engine import hop2, pipeline, verifier
 from recon.llm import qa
 from recon.llm.client import LLMClient, create_llm_client
 from recon.llm.tools import trace_order
@@ -134,20 +140,99 @@ def _resolve_llm_client(provider: str | None) -> LLMClient:
         return _UnconfiguredLLM()
 
 
-def _reconstruction_evidence(conn: sqlite3.Connection, run_id: str, records: list[dict]) -> dict | None:
+def _reconstruction_evidence(
+    conn: sqlite3.Connection, run_id: str, records: list[dict]
+) -> tuple[dict | None, str | None]:
     """Best-effort: a proposed/accepted/rejected match_link touching any of
     this exception's records carries the full reconstruction table in its
-    evidence column. Exceptions with no match_link at all (a genuine
-    refusal — AMBIGUOUS_SETTLEMENT, UNEXPLAINED_BANK_CREDIT) return None."""
+    evidence column. Returns (evidence, link_id) — the link_id is what the
+    exception queue opens the reconstruction viewer with (UI_SPEC §2.4),
+    so it's returned rather than discarded. Exceptions with no match_link
+    at all (a genuine refusal — AMBIGUOUS_SETTLEMENT,
+    UNEXPLAINED_BANK_CREDIT) return (None, None); as of migration 003
+    those carry their own `exceptions.evidence` instead, which callers
+    prefer over this reconstruction."""
     for r in records:
         row = conn.execute(
-            "SELECT evidence FROM match_link WHERE run_id = ? AND (id_a = ? OR id_b = ?) "
+            "SELECT link_id, evidence FROM match_link WHERE run_id = ? AND (id_a = ? OR id_b = ?) "
             "AND evidence IS NOT NULL LIMIT 1",
             (run_id, r["id"], r["id"]),
         ).fetchone()
-        if row and row[0]:
-            return json.loads(row[0])
-    return None
+        if row and row[1]:
+            return json.loads(row[1]), row[0]
+    return None, None
+
+
+def _exception_evidence(
+    conn: sqlite3.Connection, run_id: str, records: list[dict], stored: str | None
+) -> tuple[dict | None, str | None]:
+    """The evidence an exception row should report, and the match_link id
+    (if any) that can render it as a reconstruction. hop2's refusals store
+    their own evidence on the row (migration 003) and have no link;
+    everything else is reconstructed from whichever link touched its
+    records, exactly as before 003 existed."""
+    link_evidence, link_id = _reconstruction_evidence(conn, run_id, records)
+    if stored:
+        return json.loads(stored), link_id
+    return link_evidence, link_id
+
+
+def _hop2_reconstruction(conn: sqlite3.Connection, run_id: str, line_id: str) -> dict:
+    """The full settlement reconstruction behind one hop-2 link, as the
+    reconstruction viewer (UI_SPEC §2.3) renders it: the bank line, every
+    gateway row claiming it in this run, and the two totals.
+
+    `net_p` is recomputed here from the raw gw_payments columns via the
+    same hop2._contribution_p the matcher used — not read back from a
+    stored evidence blob, and never summed in the browser (UI_SPEC §0:
+    the frontend never computes a number). Rows are ordered by link_id,
+    which is hop2's own insertion order, so the viewer streams them in
+    the order the matcher considered them.
+    """
+    bank_row = conn.execute(
+        "SELECT line_id, value_date, credit_p, narration, utr_extracted FROM bank_lines WHERE line_id = ?",
+        (line_id,),
+    ).fetchone()
+    bank_line = (
+        {
+            "line_id": bank_row[0],
+            "value_date": bank_row[1],
+            "credit_p": bank_row[2],
+            "narration": bank_row[3],
+            "utr_extracted": bank_row[4],
+        }
+        if bank_row
+        else None
+    )
+
+    rows = []
+    for payment_id, kind, method, amount_p, fee_p, gst_p in conn.execute(
+        "SELECT g.payment_id, g.kind, g.method, g.amount_p, g.fee_p, g.gst_p "
+        "FROM match_link m JOIN gw_payments g ON g.payment_id = m.id_a "
+        "WHERE m.run_id = ? AND m.hop = 2 AND m.id_b = ? AND m.status IN ('accepted', 'proposed') "
+        "ORDER BY m.link_id",
+        (run_id, line_id),
+    ):
+        rows.append(
+            {
+                "payment_id": payment_id,
+                "kind": kind,
+                "method": method,
+                "amount_p": amount_p,
+                "fee_p": fee_p,
+                "gst_p": gst_p,
+                "net_p": hop2._contribution_p(kind, amount_p, fee_p, gst_p),
+            }
+        )
+
+    reconstructed_p = sum(r["net_p"] for r in rows)
+    credit_p = bank_line["credit_p"] if bank_line else 0
+    return {
+        "bank_line": bank_line,
+        "rows": rows,
+        "reconstructed_p": reconstructed_p,
+        "delta_p": reconstructed_p - credit_p,
+    }
 
 
 @app.get("/report")
@@ -164,12 +249,22 @@ def get_report(db_path: Path = Depends(get_db_path)) -> dict:
         seed, started_at, finished_at, llm_mode, metrics_json = row
 
         exceptions = []
-        for exc_id, code, severity, amount_at_risk_p, explanation, suggested_action, records_json in conn.execute(
-            "SELECT exc_id, code, severity, amount_at_risk_p, explanation, suggested_action, records "
+        for (
+            exc_id,
+            code,
+            severity,
+            amount_at_risk_p,
+            explanation,
+            suggested_action,
+            records_json,
+            stored_evidence,
+        ) in conn.execute(
+            "SELECT exc_id, code, severity, amount_at_risk_p, explanation, suggested_action, records, evidence "
             "FROM exceptions WHERE run_id = ? AND status = 'open' ORDER BY amount_at_risk_p DESC",
             (run_id,),
         ):
             records = json.loads(records_json)
+            evidence, evidence_link_id = _exception_evidence(conn, run_id, records, stored_evidence)
             exceptions.append(
                 {
                     "exc_id": exc_id,
@@ -179,7 +274,8 @@ def get_report(db_path: Path = Depends(get_db_path)) -> dict:
                     "explanation": explanation,
                     "suggested_action": suggested_action,
                     "records": records,
-                    "evidence": _reconstruction_evidence(conn, run_id, records),
+                    "evidence": evidence,
+                    "evidence_link_id": evidence_link_id,
                 }
             )
 
@@ -215,6 +311,11 @@ class RunRequest(BaseModel):
     llm_mode: str = "off"  # CLAUDE.md rule 5: off always works, no key required
     llm_provider: str | None = None  # anthropic|gemini; default $RECON_LLM_PROVIDER
     pace_ms: int = 0
+    # Narration is ~17 extra LLM calls (one per open exception) and is what
+    # makes an --llm on run take ~2 minutes instead of ~15 seconds. Off, the
+    # templated explanations hop1/2/3 already wrote stand unchanged, so the
+    # run console can demo live adjudication without the wait.
+    narrate: bool = True
 
 
 class RunResponse(BaseModel):
@@ -242,6 +343,7 @@ def start_run(request: RunRequest = RunRequest(), db_path: Path = Depends(get_db
                 run_id=run_id,
                 on_event=q.put,
                 pace_ms=request.pace_ms,
+                narrate=request.narrate,
             )
         except Exception as exc:
             # Never let a pipeline failure (including V5's ClearingControlFailure)
@@ -282,6 +384,22 @@ async def stream_run(run_id: str) -> StreamingResponse:
     return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
+@app.get("/api/run/latest")
+def get_latest_run(db_path: Path = Depends(get_db_path)) -> dict:
+    """The most recently finished run, in the same shape as
+    /api/run/{id}/metrics. Every screen except the run console needs "the
+    run" without having started one this session (UI_SPEC §2.4/§2.6) —
+    before this, they had no way to name a run id at all."""
+    conn = recon_db.connect(db_path)
+    try:
+        run_id = recon_db.latest_run_id(conn)
+        if run_id is None:
+            raise HTTPException(status_code=404, detail="no completed run found — run POST /api/run first")
+    finally:
+        conn.close()
+    return get_run_metrics(run_id, db_path)
+
+
 @app.get("/api/run/{run_id}/metrics")
 def get_run_metrics(run_id: str, db_path: Path = Depends(get_db_path)) -> dict:
     conn = recon_db.connect(db_path)
@@ -320,7 +438,7 @@ def get_run_exceptions(
 
         query = (
             "SELECT exc_id, code, severity, hop, records, amount_at_risk_p, age_days, "
-            "explanation, suggested_action, status FROM exceptions WHERE run_id = ?"
+            "explanation, suggested_action, status, evidence FROM exceptions WHERE run_id = ?"
         )
         params: list = [run_id]
         if hop is not None:
@@ -346,8 +464,10 @@ def get_run_exceptions(
             explanation,
             suggested_action,
             status,
+            stored_evidence,
         ) in conn.execute(query, params):
             records = json.loads(records_json)
+            evidence, evidence_link_id = _exception_evidence(conn, run_id, records, stored_evidence)
             exceptions.append(
                 {
                     "exc_id": exc_id,
@@ -360,7 +480,8 @@ def get_run_exceptions(
                     "explanation": explanation,
                     "suggested_action": suggested_action,
                     "status": status,
-                    "evidence": _reconstruction_evidence(conn, run_id, records),
+                    "evidence": evidence,
+                    "evidence_link_id": evidence_link_id,
                 }
             )
         return {"run_id": run_id, "exceptions": exceptions}
@@ -380,7 +501,7 @@ def get_match(link_id: str, db_path: Path = Depends(get_db_path)) -> dict:
         if row is None:
             raise HTTPException(status_code=404, detail=f"no such match_link: {link_id}")
         link_id_, run_id, hop, src_a, id_a, src_b, id_b, tier, confidence, status, reason, evidence_json = row
-        return {
+        result = {
             "link_id": link_id_,
             "run_id": run_id,
             "hop": hop,
@@ -394,6 +515,9 @@ def get_match(link_id: str, db_path: Path = Depends(get_db_path)) -> dict:
             "reason": reason,
             "evidence": json.loads(evidence_json) if evidence_json else None,
         }
+        if hop == 2:
+            result.update(_hop2_reconstruction(conn, run_id, id_b))
+        return result
     finally:
         conn.close()
 
@@ -427,12 +551,46 @@ def get_clearing_control(run_id: str | None = None, db_path: Path = Depends(get_
             raise HTTPException(status_code=404, detail="no completed run found — run POST /api/run first")
         residual_p = verifier.compute_residual_p(conn)
         exposure_p, breakdown = verifier.compute_exposure_p(conn, run_id)
+
+        # The T-account itself (UI_SPEC §2.6): every PG_RECEIVABLE line in
+        # ledger order, with a running balance computed server-side. The
+        # frontend never sums (UI_SPEC §0) and never subtracts — hence
+        # difference_p too.
+        entries = []
+        balance_p = 0
+        for voucher_no, entry_date, account, debit_p, credit_p, memo in conn.execute(
+            "SELECT voucher_no, entry_date, account, debit_p, credit_p, memo FROM gl_entries "
+            "WHERE account = 'PG_RECEIVABLE' ORDER BY entry_date, voucher_no, line_no"
+        ):
+            balance_p += debit_p - credit_p
+            entries.append(
+                {
+                    "voucher_no": voucher_no,
+                    "entry_date": entry_date,
+                    "account": account,
+                    "debit_p": debit_p,
+                    "credit_p": credit_p,
+                    "memo": memo,
+                    "balance_p": balance_p,
+                }
+            )
+        # Same table, same filter, two ways of adding it up — if these ever
+        # disagree the bug is here, not in the data. Assert rather than ship
+        # a T-account whose last line contradicts the control number
+        # printed beneath it.
+        assert balance_p == residual_p, (
+            f"T-account closing balance {balance_p}p != compute_residual_p {residual_p}p "
+            "— same gl_entries rows summed two ways must agree"
+        )
+
         return {
             "run_id": run_id,
             "residual_p": residual_p,
             "exposure_p": exposure_p,
+            "difference_p": residual_p - exposure_p,
             "balanced": residual_p == exposure_p,
             "breakdown": breakdown,
+            "entries": entries,
         }
     finally:
         conn.close()

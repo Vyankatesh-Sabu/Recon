@@ -23,6 +23,10 @@ export interface ExceptionRecord {
   suggested_action: string
   status: string
   evidence: unknown | null
+  /** The match_link whose reconstruction explains this exception, when one
+   * exists. Null for refusals (AMBIGUOUS_SETTLEMENT,
+   * UNEXPLAINED_BANK_CREDIT), which propose no link by design. */
+  evidence_link_id: string | null
 }
 
 /** The pipeline's own scored metrics dict (recon/scoring/scorer.py's
@@ -44,6 +48,36 @@ export interface PipelineMetrics {
   value_reconciled_p: number
   runtime_s: number
   residual_p?: number
+  narrated_exceptions?: number
+  /** One entry per tier-4 adjudication call (recon/llm/adjudicator.py's
+   * Tier4Stats.call_log) — the payload the model was shown, what it
+   * decided, and what the verifier then did with it. Absent on an
+   * --llm off run, which makes no calls. */
+  llm_call_log?: LLMCall[]
+}
+
+/** One tier-4 adjudication call, as the adjudication panel renders it.
+ * `verifier_outcome` is absent when the model abstained: nothing was
+ * proposed, so there was no verdict to reach. */
+export interface LLMCall {
+  line_id: string
+  payload: {
+    task: string
+    item: { line_id: string; value_date: string; credit_p: number; narration: string }
+    candidates: {
+      batch: string
+      rows: number
+      net_p: number
+      delta_p: number
+      date_gap_bdays: number
+      narration_tokens_matched: string[]
+    }[]
+    failed_checks: string[]
+    instruction: string
+  }
+  decision: string
+  verifier_outcome?: string
+  verifier_reason?: string | null
 }
 
 export interface RunMetrics {
@@ -69,14 +103,57 @@ export interface MatchLink {
   status: string
   reason: string
   evidence: unknown | null
+  // hop-2 links only: the full settlement reconstruction, computed
+  // server-side (recon/api.py::_hop2_reconstruction). Every figure the
+  // reconstruction viewer shows comes from here — net_p per row,
+  // reconstructed_p, delta_p — because UI_SPEC §0 forbids the browser
+  // from adding anything up itself.
+  bank_line?: ReconstructionBankLine | null
+  rows?: ReconstructionRow[]
+  reconstructed_p?: number
+  delta_p?: number
+}
+
+export interface ReconstructionBankLine {
+  line_id: string
+  value_date: string
+  credit_p: number
+  narration: string
+  utr_extracted: string | null
+}
+
+export interface ReconstructionRow {
+  payment_id: string
+  kind: string
+  method: string | null
+  amount_p: number
+  fee_p: number
+  gst_p: number
+  net_p: number
 }
 
 export interface ClearingControl {
   run_id: string
   residual_p: number
   exposure_p: number
+  /** residual_p - exposure_p, subtracted server-side. UI_SPEC §0: the
+   * browser must not compute this itself. */
+  difference_p: number
   balanced: boolean
   breakdown: Record<string, number>
+  /** Every PG_RECEIVABLE line in ledger order, with a server-computed
+   * running balance whose closing value is residual_p. */
+  entries: ClearingEntry[]
+}
+
+export interface ClearingEntry {
+  voucher_no: string
+  entry_date: string
+  account: string
+  debit_p: number
+  credit_p: number
+  memo: string | null
+  balance_p: number
 }
 
 export interface AskResponse {
@@ -111,6 +188,18 @@ export type RunEvent =
       seq: number
       run_id: string
     }
+  | {
+      // A proposal the verifier threw out (V1/V4). The gutter renders these
+      // beside exceptions — "verification is the product" is only visible
+      // if a rejection is visible.
+      kind: "rejected"
+      hop: number
+      link_id: string
+      tier: number | null
+      reason: string
+      seq: number
+      run_id: string
+    }
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(path)
@@ -134,11 +223,14 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export function startRun(opts: { seed?: number; llmMode?: "on" | "off"; paceMs?: number } = {}) {
+export function startRun(
+  opts: { seed?: number; llmMode?: "on" | "off"; paceMs?: number; narrate?: boolean } = {},
+) {
   return postJSON<{ run_id: string }>("/api/run", {
     seed: opts.seed,
     llm_mode: opts.llmMode ?? "off",
     pace_ms: opts.paceMs ?? 0,
+    narrate: opts.narrate ?? true,
   })
 }
 
@@ -172,6 +264,11 @@ export function streamRun(runId: string, onEvent: (e: RunEvent) => void, onDone:
 }
 
 export const getRunMetrics = (runId: string) => getJSON<RunMetrics>(`/api/run/${runId}/metrics`)
+
+/** The most recently finished run — how every screen other than the run
+ * console names a run without having started one. 404s when the DB has
+ * never completed a run. */
+export const getLatestRun = () => getJSON<RunMetrics>("/api/run/latest")
 
 export const getRunExceptions = (
   runId: string,

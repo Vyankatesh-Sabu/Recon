@@ -88,6 +88,7 @@ def run_pipeline(
     run_id: str | None = None,
     on_event: OnEvent | None = None,
     pace_ms: int = 0,
+    narrate: bool = True,
 ) -> dict:
     """Run V3 -> hop1 -> hop2 -> hop3 -> verifier -> [tier4 -> verifier] -> V5 -> score.
 
@@ -104,7 +105,13 @@ def run_pipeline(
     is ever set) event, in emission order, with a "seq" and this "run_id"
     stamped on. `pace_ms`: sleep that many milliseconds after each event
     (CLI `--pace`) — 0 (default) means "as fast as possible," matching every
-    existing caller's behaviour exactly.
+    existing caller's behaviour exactly. `narrate`: when False, skip
+    adjudicator.narrate_exceptions (`narrated` stays 0) — that step is one
+    LLM call per open exception (17 on seed 42, ~2 min) against ~15 s for
+    adjudication alone, and its output is cosmetic: the templated
+    explanations every hop already wrote remain in place. Adjudication,
+    the part that can actually change a match, always runs when
+    `llm_mode == 'on'`.
 
     Returns a run context dict (run_id, timing, metrics, top_exceptions,
     per-stage stats) that report.py renders. Writes the `runs` row itself.
@@ -151,7 +158,8 @@ def run_pipeline(
             verifier.run_verifier(conn, run_id, on_event=emit)  # 2nd pass: tier-4 proposals only
             adjudicator.finalize_tier4_stats(conn, run_id, tier4_stats)
             adjudicator.resolve_exceptions_for_accepted_tier4(conn, run_id)
-            narrated = adjudicator.narrate_exceptions(conn, run_id, client)
+            if narrate:
+                narrated = adjudicator.narrate_exceptions(conn, run_id, client)
 
         verifier.check_v5_clearing_control(conn, run_id)  # aborts (raises) on mismatch
         runtime_s = time.monotonic() - t0

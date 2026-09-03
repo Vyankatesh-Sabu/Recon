@@ -74,6 +74,12 @@ def run(
         0, "--pace", help="Milliseconds to sleep after each match/exception event — 0 (default) is as fast as possible; "
         "same event stream the API's SSE run console consumes (P6 supplement §3), printed one line per event here."
     ),
+    narrate: bool = typer.Option(
+        True, "--narrate/--no-narrate",
+        help="With --llm on, also regenerate each open exception's prose (one call per exception). "
+        "--no-narrate keeps the templated text and runs adjudication alone — ~15s instead of ~2min. "
+        "No effect with --llm off, which never calls a model at all."
+    ),
 ) -> None:
     """Run the matching pipeline: V3 -> hop1 -> hop2 -> hop3 -> verifier -> [tier4 -> verifier] -> V5 -> scorer (SPEC §6)."""
     llm_client = None
@@ -85,11 +91,15 @@ def run(
     def print_event(event: dict) -> None:
         if event["kind"] == "match":
             typer.echo(f"  [{event['seq']:04d}] match  hop{event['hop']} {event['id_a']} <-> {event['id_b']}")
+        elif event["kind"] == "rejected":
+            typer.echo(f"  [{event['seq']:04d}] REJECT hop{event['hop']} {event['link_id']} — {event['reason']}")
         else:
             typer.echo(f"  [{event['seq']:04d}] except hop{event['hop']} {event['code']} ({event['severity']})")
 
     on_event = print_event if pace else None
-    ctx = pipeline.run_pipeline(llm_mode=llm, llm_client=llm_client, on_event=on_event, pace_ms=pace)
+    ctx = pipeline.run_pipeline(
+        llm_mode=llm, llm_client=llm_client, on_event=on_event, pace_ms=pace, narrate=narrate
+    )
     m = ctx["metrics"]
     typer.echo(
         f"run: {ctx['run_id']} — {m['records_processed']} records, {m['runtime_s']:.2f}s, "
