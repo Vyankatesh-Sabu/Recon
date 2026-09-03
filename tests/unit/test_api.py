@@ -115,15 +115,6 @@ def test_report_endpoint_no_run_yet(tmp_path: Path):
         app.dependency_overrides.clear()
 
 
-def test_dashboard_is_served_at_slash_dashboard():
-    client = TestClient(app)
-    response = client.get("/dashboard/")
-    assert response.status_code == 200
-    assert "RECON-4" in response.text
-    assert "/report" in response.text
-    assert "/ask" in response.text
-
-
 # --- P6 supplement: run/streaming/reconstruction API ----------------------
 
 

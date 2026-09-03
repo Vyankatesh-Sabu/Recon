@@ -49,11 +49,12 @@ treat this file as the non-negotiable "how".
    **Approved exception (P6 UI supplement, confirmed with the user
    2026-08-31):** for the `web/` frontend only (P7-P10) — Vite + React +
    TypeScript + Tailwind, optionally recharts and framer-motion for one
-   screen. This supersedes the plain-HTML `web/index.html` dashboard shipped
+   screen. This superseded the plain-HTML `web/index.html` dashboard shipped
    in the original P6; `recon/` stays pure Python, no Node in the backend.
-   `web/index.html`/`/dashboard`/`/ask`/`/report` are left in place (not
-   deleted) as of this note — they become throwaway once the new frontend
-   ships, but nothing has removed them yet.
+   `web/index.html` and its `/dashboard` mount are now **deleted** — two
+   UIs over the same endpoints could disagree about the same run. `/ask`
+   and `/report` remain: both are public API surface, and `/report` is
+   what a reader gets without running the frontend at all.
    **Approved exception (confirmed with the user 2026-08-31):**
    `python-dotenv` — `.env` (gitignored) holds `ANTHROPIC_API_KEY`/
    `GEMINI_API_KEY`/`RECON_LLM_PROVIDER` so they survive across shell

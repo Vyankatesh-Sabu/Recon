@@ -1,4 +1,4 @@
-"""api.py — FastAPI app: Q&A (SPEC §9), dashboard data (SPEC §10), and the
+"""api.py — FastAPI app: Q&A (SPEC §9), report data (SPEC §10), and the
 run/streaming/reconstruction API added by the P6 UI supplement (§3).
 
 POST /ask {"question": str} -> {"answer": str, "tool_calls": [...], "record_ids": [...]}.
@@ -8,9 +8,14 @@ GET  /report -> the latest run's metrics + full open-exception list, each
     row by hop2 (migration 003) since they deliberately propose no link;
     everything else is reconstructed from whichever match_link touched its
     records, and reports that link's id as `evidence_link_id`.
-web/index.html is mounted at /dashboard (plain HTML + fetch, SPEC §10).
+The original SPEC §10 dashboard (a plain-HTML page mounted at /dashboard)
+was removed once web-app/ shipped — it was a second, worse UI over the
+same endpoints, and leaving it mounted meant two screens could disagree
+about the same run. /ask and /report stay: both are part of the public
+API surface, and /report is what a reader gets without running the
+frontend at all.
 
-P6 supplement §3 API surface (all additive — /ask, /report, /dashboard are
+P6 supplement §3 API surface (all additive — /ask and /report are
 untouched, existing tests keep passing):
     POST /api/run                     -> {"run_id": str}, starts a pipeline
                                           run in a background thread and
@@ -56,7 +61,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config
@@ -72,10 +76,6 @@ from recon.llm.tools import trace_order
 load_dotenv()
 
 app = FastAPI(title="RECON-4 Q&A")
-
-_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
-if _WEB_DIR.is_dir():
-    app.mount("/dashboard", StaticFiles(directory=_WEB_DIR, html=True), name="dashboard")
 
 
 class AskRequest(BaseModel):
@@ -332,7 +332,7 @@ def get_report(db_path: Path = Depends(get_db_path)) -> dict:
 # /stream first — Queue.get() is destructive, so this is single-reader by
 # construction; a second concurrent stream on the same run_id gets a 404
 # ("already consumed") rather than silently splitting the event feed. That
-# is a real limitation, acceptable for a single-viewer demo dashboard
+# is a real limitation, acceptable for a single-viewer demo console
 # within P6's timebox — not something a multi-viewer product could ship.
 # An entry is also left behind (and never cleaned up) if nobody ever opens
 # the stream for a completed run; harmless for a demo-length process.
@@ -691,8 +691,7 @@ def api_ask(
 ) -> AskResponse:
     """Same grounded Q&A loop as POST /ask, namespaced under /api for the
     new frontend — identical behavior, kept as a separate route (rather
-    than replacing /ask) so the existing dashboard and its tests are
-    untouched."""
+    than replacing /ask) so /ask and its tests are untouched."""
     conn = recon_db.connect(db_path)
     try:
         result = qa.answer_question(conn, request.question, client, run_id=request.run_id)

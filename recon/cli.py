@@ -1,7 +1,7 @@
 """cli.py — typer app: generate|load|run|report|serve (SPEC §2).
 
 P5: every command does real work. `serve` runs the FastAPI app (recon/api.py,
-POST /ask — SPEC §9) via uvicorn if installed. The dashboard (SPEC §10) is P6.
+POST /ask — SPEC §9) via uvicorn. The frontend that consumes it is web-app/.
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8000,
 ) -> None:
-    """Serve the FastAPI app: POST /ask (SPEC §9). The dashboard (SPEC §10) is P6."""
+    """Serve the FastAPI app — /ask, /report and the /api surface web-app/ consumes."""
     try:
         import uvicorn
     except ImportError:
