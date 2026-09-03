@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+
+# Video production: script, narration, slides, Motion Canvas scenes and the
+# rendered cuts. Kept on disk, deliberately out of the repo — the submission
+# is the code; the video is a separate artifact delivered by link.
+video/

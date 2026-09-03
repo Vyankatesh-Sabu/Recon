@@ -103,34 +103,52 @@ instead of guessing.
 ## Architecture
 
 ```mermaid
-flowchart LR
-  O["orders.csv"] --> L
-  G["gateway.csv"] --> L
-  B["bank.csv"] --> L
-  J["gl.csv"] --> L
-  L["loader<br/>normalise, quarantine bad rows"] --> DB[("SQLite<br/>integer paise<br/>partial unique indexes enforce V2")]
-  DB --> H1["hop 1: orders to captures<br/>tier 1 exact"]
-  H1 --> H2["hop 2: captures to bank<br/>tier 1 UTR / tier 2 subset-sum"]
-  H2 --> H3["hop 3: bank to ledger<br/>decomposition check"]
-  H3 --> V{"verifier, sole authority<br/>V1 re-derive from raw rows<br/>V2 no double claims<br/>V3 vouchers balance<br/>V4 pairing re-check"}
-  V -->|accepted| DB
-  V -->|rejected or refused| X["exception queue<br/>typed / rupees at risk / action"]
-  V --> C{"V5 clearing control<br/>GL residual == exception exposure<br/>else ABORT"}
-  H2 -.residue only.-> T4["tier 4: LLM proposes<br/>never accepts, may not propose on ties"]
-  T4 -.proposal.-> V
-  X --> R["report / SSE run console / Q&A tools"]
-  DB --> R
-  E["multi-seed eval<br/>344 worlds, 0.0% false match"] -.wraps.-> H1
+flowchart TB
+  SRC["orders.csv &middot; gateway.csv &middot; bank.csv &middot; gl.csv"]
+  LOAD["loader<br/>normalises, quarantines bad rows"]
+  DB[("SQLite &middot; integer paise<br/>partial unique indexes enforce V2")]
+  H1["hop 1 &middot; orders to captures<br/>tier 1 exact"]
+  H2["hop 2 &middot; captures to bank<br/>tier 1 UTR, tier 2 subset-sum"]
+  H3["hop 3 &middot; bank to ledger<br/>decomposition check"]
+  VER{"VERIFIER<br/>the only thing that can accept a match<br/>re-derives from raw rows"}
+  ACC["accepted"]
+  EXC["exception queue<br/>typed &middot; rupees at risk &middot; action"]
+  V5["V5 clearing control<br/>GL residual equals exception exposure,<br/>or the run aborts"]
+  T4["tier 4 &middot; the model<br/>proposes only, never accepts<br/>barred from ties"]
+
+  SRC --> LOAD --> DB --> H1 --> H2 --> H3 --> VER
+  VER -->|accepted| ACC
+  VER -->|rejected or refused| EXC
+  VER --> V5
+  H2 -.->|residue only| T4
+  T4 -.->|proposal| VER
+
+  classDef ok fill:#e9f5f0,stroke:#4ea88a,stroke-width:1.5px,color:#0e1116
+  classDef bad fill:#fbeceb,stroke:#c9564b,stroke-width:1.5px,color:#0e1116
+  classDef ctl fill:#fbf4e6,stroke:#c79a45,stroke-width:1.5px,color:#0e1116
+  classDef model fill:#eef2fd,stroke:#5b8def,stroke-width:1.5px,color:#0e1116
+  class VER ok
+  class ACC ok
+  class EXC bad
+  class V5 ctl
+  class T4 model
 ```
 
-1. Four sources, one loader that quarantines bad rows rather than crashing.
-2. Money is integer paise all the way through — no float anywhere.
-3. Three deterministic hops; tier 2 is real subset-sum reconstruction, not a lookup.
-4. One verifier is the only thing that can accept a match, and it re-derives instead of trusting.
-5. Uniqueness (no double claims) is enforced *in the database*, by partial unique indexes.
-6. A clearing-account control computes one number two independent ways and aborts on mismatch.
-7. The LLM sits *beside* the pipeline: it proposes on residue, is disposed of like any other proposal, and is barred from ties.
-8. The whole thing is wrapped in a multi-seed evaluation — the accuracy number is measured across worlds, not on the demo.
+*The whole pipeline is additionally wrapped in a multi-seed evaluation
+(`make eval`) — the accuracy figure above is measured across 344 generated
+worlds, not on this one.*
+
+**What the shape of it is arguing**
+
+| | |
+|---|---|
+| **Four sources, one loader** | Bad rows are quarantined, not fatal. A malformed statement line shouldn't take the run down. |
+| **Integer paise end to end** | No float anywhere, `int` with a `_p` suffix. Formatted to rupees only at display time. |
+| **Three deterministic hops** | Hop 2 is real subset-sum reconstruction, not a lookup — that's how a settlement with no shared key gets matched. |
+| **One verifier, sole authority** | Nothing else in the codebase may mark a match accepted, and it re-derives the arithmetic from raw rows rather than trusting whoever proposed it. |
+| **Uniqueness lives in the database** | Partial unique indexes enforce "no record claimed twice", so the invariant can't be forgotten by application code. |
+| **A control that can abort the run** | V5 computes one number two independent ways and stops everything if they disagree. It has caught two of our own bugs. |
+| **The model is beside, not inside** | Tier 4 touches only the verifier — never a hop. It proposes on residue, is disposed of like any other proposal, and on a genuine tie it may not propose at all. |
 
 *Deterministic where money is decided. Probabilistic only where it can be
 checked. Measured across 344 worlds, not one.*
