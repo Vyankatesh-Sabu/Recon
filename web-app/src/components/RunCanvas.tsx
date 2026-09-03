@@ -6,6 +6,11 @@ import { isFullyChained, type ChainRow } from "../lib/runChains"
 import type { RunEvent } from "../lib/api"
 
 type ExceptionEvent = Extract<RunEvent, { kind: "exception" }>
+type RejectedEvent = Extract<RunEvent, { kind: "rejected" }>
+/** The gutter carries both kinds of failure: an exception the engine
+ * raised, and a proposal the verifier threw out. The second is the one
+ * that demonstrates the thesis, so it is shown, not counted. */
+export type GutterItem = ExceptionEvent | RejectedEvent
 
 const COLUMNS = ["Orders", "Gateway", "Bank", "Ledger"] as const
 
@@ -48,7 +53,7 @@ function RowView({ row, onOpenReconstruction }: { row: ChainRow; onOpenReconstru
   )
 }
 
-function GutterChip({ exc }: { exc: ExceptionEvent }) {
+function GutterChip({ item }: { item: GutterItem }) {
   return (
     <motion.div
       layout
@@ -57,14 +62,32 @@ function GutterChip({ exc }: { exc: ExceptionEvent }) {
       transition={{ duration: 0.25 }}
       className="shrink-0"
     >
-      <SeverityRule severity={exc.severity}>
-        <div className="bg-ink px-2 py-1 rounded-sm text-xs whitespace-nowrap flex items-center gap-1.5">
-          <span>{exc.code}</span>
-          <Money amountP={exc.amount_at_risk_p} tone="caution" />
+      {item.kind === "exception" ? (
+        <SeverityRule severity={item.severity}>
+          <div className="bg-ink px-2 py-1 rounded-sm text-xs whitespace-nowrap flex items-center gap-1.5">
+            <span>{item.code}</span>
+            <Money amountP={item.amount_at_risk_p} tone="caution" />
+          </div>
+        </SeverityRule>
+      ) : (
+        // A rejection is always --flag regardless of tier: the verifier
+        // refusing a proposal is the most consequential thing on screen.
+        <div className="border-l-2 pl-3" style={{ borderColor: "var(--flag)" }}>
+          <div className="bg-ink px-2 py-1 rounded-sm text-xs whitespace-nowrap flex items-center gap-1.5">
+            <span className="text-flag">REJECTED</span>
+            <span className="figures">T{item.tier ?? "?"}</span>
+            <span className="text-muted" title={item.reason}>
+              {item.reason}
+            </span>
+          </div>
         </div>
-      </SeverityRule>
+      )}
     </motion.div>
   )
+}
+
+function gutterKey(item: GutterItem): string {
+  return item.kind === "exception" ? item.exc_id : `rejected-${item.link_id}`
 }
 
 /**
@@ -82,7 +105,7 @@ export function RunCanvas({
   onOpenReconstruction,
 }: {
   rows: ChainRow[]
-  gutter: ExceptionEvent[]
+  gutter: GutterItem[]
   onOpenReconstruction?: (linkId: string) => void
 }) {
   return (
@@ -103,11 +126,11 @@ export function RunCanvas({
         {rows.length === 0 && <div className="px-3 py-8 text-center text-muted text-sm">No records yet.</div>}
       </div>
       <div className="border-t border-rule px-3 py-2">
-        <div className="text-xs text-muted mb-1.5">Exceptions</div>
+        <div className="text-xs text-muted mb-1.5">Exceptions and rejected proposals</div>
         <div className="flex gap-2 overflow-x-auto pb-1 min-h-[1.75rem]">
           <AnimatePresence initial={false}>
-            {gutter.map((exc) => (
-              <GutterChip key={exc.exc_id} exc={exc} />
+            {gutter.map((item) => (
+              <GutterChip key={gutterKey(item)} item={item} />
             ))}
           </AnimatePresence>
           {gutter.length === 0 && <span className="text-muted text-xs">None yet.</span>}
