@@ -29,6 +29,7 @@ export function RunConsole() {
   const [gutter, setGutter] = useState<ExceptionEvent[]>([])
   const [hopCounts, setHopCounts] = useState<Record<1 | 2 | 3, number>>({ 1: 0, 2: 0, 3: 0 })
   const [llmCalls, setLlmCalls] = useState(0)
+  const [rejected, setRejected] = useState(0)
   const [recordsSeen, setRecordsSeen] = useState(0)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [metrics, setMetrics] = useState<PipelineMetrics | null>(null)
@@ -47,6 +48,12 @@ export function RunConsole() {
     if (event.kind === "exception") {
       setGutter((prev) => [...prev, event])
       for (const r of event.records) seenIds.current.add(r.id)
+    } else if (event.kind === "rejected") {
+      // Rejections get their own gutter chip in ROADMAP step 6; until then
+      // they are counted rather than rendered. Seed 42 with the LLM off
+      // produces none — every proposal survives V1 — so nothing the demo
+      // path emits is being dropped here.
+      setRejected((n) => n + 1)
     } else {
       setChain((prev) => applyMatchEvent(prev, event))
       seenIds.current.add(event.id_a)
@@ -64,6 +71,7 @@ export function RunConsole() {
     setGutter([])
     setHopCounts({ 1: 0, 2: 0, 3: 0 })
     setLlmCalls(0)
+    setRejected(0)
     setRecordsSeen(0)
     setMetrics(null)
     seenIds.current = new Set()
@@ -125,6 +133,10 @@ export function RunConsole() {
         <div>
           <span className="text-muted text-xs">LLM calls </span>
           <span className="figures tabular-nums">{llmCalls}</span>
+        </div>
+        <div>
+          <span className="text-muted text-xs">rejected by verifier </span>
+          <span className={`figures tabular-nums ${rejected > 0 ? "text-flag" : ""}`}>{rejected}</span>
         </div>
       </div>
 

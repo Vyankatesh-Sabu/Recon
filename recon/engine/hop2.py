@@ -313,6 +313,7 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
                 "value_date": value_date,
                 "credit_p": credit_p,
                 "narration": narration,
+                "utr_extracted": utr_extracted,
                 "pool": pool,
                 "pool_evidence": pool_evidence,
                 "result": result,
@@ -330,6 +331,7 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
         value_date = entry["value_date"]
         credit_p = entry["credit_p"]
         narration = entry["narration"]
+        utr_extracted = entry["utr_extracted"]
         pool = entry["pool"]
         pool_evidence = entry["pool_evidence"]
         result = entry["result"]
@@ -345,6 +347,7 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
                     "bank_line": line_id,
                     "value_date": value_date.isoformat(),
                     "narration": narration,
+                    "utr_extracted": utr_extracted,
                     "target_p": credit_p,
                     "candidate_pool": pool_evidence,
                     "subset": [{"id": pid, "net_p": v} for pid, v in result.subset],
@@ -389,6 +392,7 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
                 "bank_line": line_id,
                 "value_date": value_date.isoformat(),
                 "narration": narration,
+                "utr_extracted": utr_extracted,
                 "target_p": credit_p,
                 "candidate_pool": pool_evidence,
                 "subset_a": [{"id": pid, "net_p": v} for pid, v in result.subset_a],
@@ -416,6 +420,7 @@ def run_hop2(conn: sqlite3.Connection, run_id: str, on_event: OnEvent | None = N
                 "bank_line": line_id,
                 "value_date": value_date.isoformat(),
                 "narration": narration,
+                "utr_extracted": utr_extracted,
                 "target_p": credit_p,
                 "candidate_pool": pool_evidence,
                 "reason": result.reason,

@@ -29,6 +29,30 @@ export interface ExceptionRecord {
   evidence_link_id: string | null
 }
 
+/** What hop2 stored on a refusal (recon/engine/hop2.py, migration 003):
+ * the bank line it could not resolve, and the disjoint candidate readings
+ * that made it unresolvable. `subset_a`/`subset_b` come from the two-
+ * disjoint-subsets branch; `subset` + `colliding_lines` from the
+ * cross-collision branch, where one reading is claimed by two bank lines.
+ * `reason` is present on UNEXPLAINED_BANK_CREDIT instead of any subset. */
+export interface RefusalEvidence {
+  tier: number
+  bank_line: string
+  value_date: string
+  narration: string
+  utr_extracted: string | null
+  target_p: number
+  tolerance_p: number
+  candidate_pool: { id: string; captured_on: string; net_p: number }[]
+  subset_a?: { id: string; net_p: number }[]
+  subset_b?: { id: string; net_p: number }[]
+  subtotal_a_p?: number
+  subtotal_b_p?: number
+  subset?: { id: string; net_p: number }[]
+  colliding_lines?: string[]
+  reason?: string
+}
+
 /** The pipeline's own scored metrics dict (recon/scoring/scorer.py's
  * return value) — everything UI_SPEC.md §2.2's metrics band renders. */
 export interface PipelineMetrics {
